@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f4efe7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#16130f" media="(prefers-color-scheme: dark)">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex">
+  <title>一起翻相册</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/js/main.js"></script>
+</head>
+<body>
+  <!-- 两个入口共用的文件选择框，放在 body 下以保证 iOS 能从任何地方唤起 -->
+  <input type="file" id="picker" class="visually-hidden" accept="image/*" multiple tabindex="-1">
+
+  <!-- 分享者：首页 -->
+  <section class="view landing" id="landing" hidden>
+    <div class="landing-inner">
+      <div class="prints" aria-hidden="true"><span></span><span></span><span></span></div>
+      <h1>一起翻相册</h1>
+      <p class="lede">挑几张照片，朋友扫码就能在自己的屏幕上和你同步翻看。不用把手机递过去。</p>
+      <label class="btn btn-primary btn-lg" for="picker">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v9a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 16.5z"/><path d="m4.5 16 4.2-4.2a1.5 1.5 0 0 1 2.1 0L15 16m-1.5-1.5 1.7-1.7a1.5 1.5 0 0 1 2.1 0l2.2 2.2"/><circle cx="15.5" cy="9.5" r="1.3"/></svg>
+        选择照片，开始分享
+      </label>
+      <ul class="promises">
+        <li><strong>照片直接传到朋友的设备</strong>，全程加密，不上传服务器</li>
+        <li><strong>你翻到哪张，朋友才收到哪张</strong>，其余照片不会离开你的手机</li>
+        <li><strong>随时结束</strong>，朋友屏幕上的照片立即清除</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 看照片的舞台：分享者和观看者共用 -->
+  <section class="view stage" id="stage" hidden>
+    <header class="bar bar-top">
+      <span class="chip" id="status" data-state="wait"><i class="dot"></i><span class="chip-text">正在连接…</span></span>
+      <div class="actions host-only">
+        <button type="button" class="btn btn-glass" id="btn-invite">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2v2h-2zM18 18h2v2h-2zM14 18h2v2h-2zM18 14h2v2h-2z"/></svg>
+          邀请
+        </button>
+        <button type="button" class="btn btn-glass btn-end" id="btn-end">结束</button>
+      </div>
+      <div class="actions viewer-only">
+        <button type="button" class="btn btn-glass btn-icon" id="btn-fullscreen" aria-label="全屏" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="frame" id="frame">
+      <img class="photo" alt="" draggable="false">
+      <img class="photo" alt="" draggable="false">
+      <div class="placeholder" id="placeholder">
+        <div class="spinner"></div>
+        <p id="placeholder-text">正在连接…</p>
+      </div>
+    </div>
+    <button type="button" class="nav nav-prev host-only" id="btn-prev" aria-label="上一张">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5-7 7 7 7"/></svg>
+    </button>
+    <button type="button" class="nav nav-next host-only" id="btn-next" aria-label="下一张">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+    </button>
+
+    <footer class="bar bar-bottom">
+      <div class="counter" id="counter"></div>
+      <div class="strip host-only" id="strip">
+        <label class="thumb thumb-add" for="picker" aria-label="添加照片">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        </label>
+      </div>
+    </footer>
+  </section>
+
+  <!-- 整页提示：结束、失效等 -->
+  <section class="view notice" id="notice" hidden>
+    <div class="notice-inner">
+      <div class="prints prints-closed" aria-hidden="true"><span></span><span></span><span></span></div>
+      <h2 id="notice-title"></h2>
+      <p id="notice-text"></p>
+      <a class="btn btn-primary" id="notice-action" href="/" hidden></a>
+    </div>
+  </section>
+
+  <dialog class="sheet" id="invite" aria-labelledby="invite-title">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <h2 id="invite-title">让朋友扫码加入</h2>
+    <p class="sheet-sub">用相机扫一扫，浏览器里直接打开，不用装 App。照片从你的设备直接发出，分享时请让本页面留在前台。</p>
+    <div class="qr"><img id="qr" alt="加入分享的二维码"></div>
+    <div class="segmented" id="addr-switch" role="group" aria-label="二维码使用的地址" hidden></div>
+    <div class="link-row">
+      <input id="join-link" readonly aria-label="加入链接">
+      <button type="button" class="btn btn-quiet" id="btn-copy">复制</button>
+    </div>
+    <div class="upload" id="upload" hidden>
+      <div class="upload-bar"><i id="upload-fill"></i></div>
+      <span id="upload-text"></span>
+    </div>
+    <p class="hint" id="invite-hint"></p>
+    <button type="button" class="btn btn-primary" id="btn-start" autofocus>开始翻看</button>
+  </dialog>
+
+  <dialog class="sheet sheet-small" id="confirm-end" aria-labelledby="confirm-title">
+    <h2 id="confirm-title">结束这次分享？</h2>
+    <p class="sheet-sub">朋友屏幕上的照片会立即清除，链接随之失效。</p>
+    <div class="sheet-actions">
+      <button type="button" class="btn btn-quiet" id="confirm-cancel">再看看</button>
+      <button type="button" class="btn btn-danger" id="confirm-ok">结束分享</button>
+    </div>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

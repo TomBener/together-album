@@ -1,0 +1,19 @@
+{
+  "name": "together-album",
+  "version": "0.1.0",
+  "private": true,
+  "description": "一起翻相册：面对面同步翻看照片的临时分享 Web App",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "tunnel": "node server.js --tunnel",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "ws": "^8.22.0"
+  }
+}

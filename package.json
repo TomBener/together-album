@@ -7,7 +7,9 @@
   "scripts": {
     "start": "node server.js",
     "tunnel": "node server.js --tunnel",
-    "test": "node --test"
+    "test": "node --test",
+    "dev:worker": "cf dev",
+    "deploy": "cf deploy"
   },
   "engines": {
     "node": ">=20"

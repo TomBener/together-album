@@ -834,6 +834,7 @@ dialog.sheet h2 {
 
 .qr {
   width: min(232px, 62vw);
+  width: min(232px, 62vw, 30dvh); /* 矮屏幕上收小一点，让“发送”和“开始翻看”不用滚动就能看到 */
   margin: 0 auto 14px;
   padding: 14px;
   border-radius: 18px;
@@ -875,6 +876,13 @@ dialog.sheet h2 {
   color: var(--ink);
   font-weight: 600;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.btn-share {
+  width: 100%;
+  min-height: 48px;
+  margin-bottom: 12px;
+  border-radius: 14px;
 }
 
 .link-row {

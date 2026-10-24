@@ -7,6 +7,7 @@ import { HostLink } from './rtc.js';
 const STORE_KEY = 'together-album:host';
 const MAX_PHOTOS = 100;
 const isTouch = matchMedia('(hover: none)').matches;
+const isApple = /iPhone|iPad|Macintosh/.test(navigator.userAgent); // iPad 的 UA 也自称 Macintosh
 
 // 照片只存在于这个页面的内存里，直接经 WebRTC 发给观看者，从不上传服务器
 const S = {
@@ -327,6 +328,8 @@ function renderInvite() {
     inviteSignature = signature;
     $('#qr').src = `/api/sessions/${S.id}/qr?u=${choice}`;
     $('#join-link').value = join?.url ?? '';
+    // 系统分享面板：iPhone 上可以直接隔空投送给旁边的朋友，安卓上是快速分享。只在 HTTPS 下可用
+    $('#btn-share').hidden = !join || !navigator.share || navigator.canShare?.({ url: join.url }) === false;
     const seg = $('#addr-switch');
     seg.hidden = S.joinUrls.length < 2;
     seg.replaceChildren(
@@ -366,6 +369,15 @@ function bindControls() {
     $('#invite').close();
     if (isTouch && openBefore === 0) toast('左右滑动，或点按屏幕两侧翻页');
   });
+  $('#share-text').textContent = isApple ? '用隔空投送发给朋友' : '发送链接';
+  $('#btn-share').addEventListener('click', async () => {
+    try {
+      // 只传链接：带上文字的话，隔空投送会把它当成一段备忘而不是直接打开网页
+      await navigator.share({ url: $('#join-link').value });
+    } catch (err) {
+      if (err.name !== 'AbortError') toast('没能打开分享，请复制链接发给朋友');
+    }
+  });
   $('#btn-copy').addEventListener('click', async () => {
     const ok = await copyText($('#join-link').value, $('#join-link'));
     toast(ok ? '链接已复制' : '复制失败，请长按链接手动复制');
@@ -377,6 +389,8 @@ function bindControls() {
   // 点弹层外面关闭
   for (const dialog of document.querySelectorAll('dialog')) {
     dialog.addEventListener('click', (e) => {
+      // 点在里面的按钮上不算；键盘或读屏触发的点击没有坐标，不能只靠位置判断
+      if (e.target !== dialog) return;
       const r = dialog.getBoundingClientRect();
       const inside = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
       if (!inside) dialog.close();

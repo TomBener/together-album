@@ -98,6 +98,10 @@
     <p class="sheet-sub">用相机扫一扫，浏览器里直接打开，不用装 App。照片从你的设备直接发出，分享时请让本页面留在前台。</p>
     <div class="qr"><img id="qr" alt="加入分享的二维码"></div>
     <div class="segmented" id="addr-switch" role="group" aria-label="二维码使用的地址" hidden></div>
+    <button type="button" class="btn btn-quiet btn-share" id="btn-share" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14.5V4m0 0L8.5 7.5M12 4l3.5 3.5"/><path d="M8.5 10.5h-2A1.5 1.5 0 0 0 5 12v6.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V12a1.5 1.5 0 0 0-1.5-1.5h-2"/></svg>
+      <span id="share-text">发送链接</span>
+    </button>
     <div class="link-row">
       <input id="join-link" readonly aria-label="加入链接">
       <button type="button" class="btn btn-quiet" id="btn-copy">复制</button>

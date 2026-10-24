@@ -1,6 +1,6 @@
 import { $, api, toast, showView, showNotice, keepScreenOn, copyText } from './util.js';
 import { subscribe } from './live.js';
-import { createStage } from './stage.js';
+import { createStage, bindSwipe } from './stage.js';
 import { prepareImage } from './images.js';
 import { HostLink } from './rtc.js';
 
@@ -33,7 +33,7 @@ let openBefore = 0;
 
 export function startHost() {
   document.body.classList.add('role-host');
-  stage = createStage($('#frame'));
+  stage = createStage($('#stage'));
   bindControls();
   showView('landing');
 
@@ -400,22 +400,13 @@ function bindControls() {
   });
 
   // 滑动翻页；点按左右三分之一处也能翻
-  const frame = $('#frame');
-  let start = null;
-  frame.addEventListener('pointerdown', (e) => {
-    if (e.isPrimary) start = { x: e.clientX, y: e.clientY };
-  });
-  frame.addEventListener('pointercancel', () => (start = null));
-  frame.addEventListener('pointerup', (e) => {
-    if (!start || !e.isPrimary) return;
-    const dx = e.clientX - start.x;
-    const dy = e.clientY - start.y;
-    start = null;
-    if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) return go(S.index + (dx < 0 ? 1 : -1));
-    if (Math.hypot(dx, dy) > 10) return;
-    const { left, width } = frame.getBoundingClientRect();
-    const x = (e.clientX - left) / width;
-    if (x < 0.3) go(S.index - 1);
-    else if (x > 0.7) go(S.index + 1);
+  bindSwipe(stage, {
+    canStep: (step) => S.index >= 0 && Boolean(S.photos[S.index + step]),
+    step: (step) => go(S.index + step),
+    blocked: (step) => go(S.index + step), // 由 go 提示“已经是最后一张了”等
+    tap(x) {
+      if (x < 0.3) go(S.index - 1);
+      else if (x > 0.7) go(S.index + 1);
+    },
   });
 }

@@ -36,6 +36,8 @@
 
   <!-- 看照片的舞台：分享者和观看者共用 -->
   <section class="view stage" id="stage" hidden>
+    <div class="ambient" aria-hidden="true"><canvas width="32" height="32"></canvas><canvas width="32" height="32"></canvas></div>
+    <div class="recv viewer-only" id="recv" aria-hidden="true"><i></i></div>
     <header class="bar bar-top">
       <span class="chip" id="status" data-state="wait"><i class="dot"></i><span class="chip-text">正在连接…</span></span>
       <div class="actions host-only">
@@ -60,14 +62,17 @@
         <p id="placeholder-text">正在连接…</p>
       </div>
     </div>
-    <button type="button" class="nav nav-prev host-only" id="btn-prev" aria-label="上一张">
+    <button type="button" class="nav nav-prev" id="btn-prev" aria-label="上一张">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5-7 7 7 7"/></svg>
     </button>
-    <button type="button" class="nav nav-next host-only" id="btn-next" aria-label="下一张">
+    <button type="button" class="nav nav-next" id="btn-next" aria-label="下一张">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
     </button>
 
     <footer class="bar bar-bottom">
+      <button type="button" class="btn btn-glass resync viewer-only" id="btn-resync" hidden>
+        <i class="dot"></i><span id="resync-text">回到同步</span>
+      </button>
       <div class="counter" id="counter"></div>
       <div class="strip host-only" id="strip">
         <label class="thumb thumb-add" for="picker" aria-label="添加照片">

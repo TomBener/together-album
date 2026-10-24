@@ -1,25 +1,32 @@
-import { $, api, showView, showNotice, keepScreenOn } from './util.js';
+import { $, api, toast, showView, showNotice, keepScreenOn } from './util.js';
 import { subscribe } from './live.js';
-import { createStage } from './stage.js';
+import { createStage, bindSwipe } from './stage.js';
 import { ViewerLink, randomId } from './rtc.js';
 
 const RETRY_MS = 12_000; // 这么久还没直连上，就请分享者重新发起连接
+const isTouch = matchMedia('(hover: none)').matches;
 
 export function startViewer(sessionId) {
   document.body.classList.add('role-viewer');
   showView('stage');
-  const stage = createStage($('#frame'));
   const stageEl = $('#stage');
+  const stage = createStage(stageEl);
   const peerId = randomId(); // 整个页面生命周期不变，信令断线重连不会被当成新观看者
-  const photos = new Map(); // 照片 id → blob URL，只有分享者翻到过的照片才会出现在这里
+  const photos = new Map(); // 照片 id → blob URL
+  // 第几张 → 照片 id。只记分享者翻到并停留过的照片，观看者只能在这些照片里来回翻；
+  // 快速连翻时传到一半就被跳过的照片不在其中
+  const seen = new Map();
   const V = {
     link: null,
     p2p: 'idle',
     signaling: 'connecting',
     failures: 0,
     progress: null,
-    index: -1,
+    index: -1, // 这台设备正在看的
+    host: -1, // 分享者正在看的
     total: 0,
+    following: true, // 跟着分享者翻；自己翻到别处后为 false，直到回到分享者那一张
+    hinted: false,
     ended: false,
   };
   let retryTimer = null;
@@ -92,16 +99,62 @@ export function startViewer(sessionId) {
     render();
   }
 
+  // 分享者翻页、加照片或重连时都会发来；张数变了但还是同一张时什么也不用做
   function onShow({ id, index, total }) {
     V.total = total;
-    const url = photos.get(id);
-    if (url) {
-      const direction = V.index === -1 ? 0 : Math.sign(index - V.index);
-      V.index = index;
-      stage.show(url, direction);
-      wake();
+    if (photos.has(id)) {
+      const moved = index !== V.host;
+      seen.set(index, id);
+      V.host = index;
+      if (index === V.index) V.following = true; // 分享者翻到了这边正在看的这张，重新同步
+      else if (V.following) display(index);
+      else if (moved) nudge();
+      if (!V.hinted && seen.size === 2) {
+        V.hinted = true;
+        toast(isTouch ? '左右滑动可以回看之前的照片' : '用方向键可以回看之前的照片');
+      }
     }
     render();
+  }
+
+  function display(index) {
+    const direction = V.index === -1 ? 0 : Math.sign(index - V.index);
+    V.index = index;
+    V.following = index === V.host;
+    stage.show(photos.get(seen.get(index)), direction);
+    wake();
+    render();
+  }
+
+  // 在翻到过的照片里找 step 方向上最近的一张；分享者可能点缩略图跳着翻，所以不一定相邻
+  function neighbor(step) {
+    let best = null;
+    for (const i of seen.keys()) {
+      if ((i - V.index) * step > 0 && (best === null || Math.abs(i - V.index) < Math.abs(best - V.index))) best = i;
+    }
+    return best;
+  }
+
+  function go(step) {
+    if (V.ended || V.index < 0) return;
+    const index = neighbor(step);
+    if (index === null) blocked(step);
+    else display(index);
+  }
+
+  function blocked(step) {
+    if (V.index < 0) return;
+    if (step > 0) toast(V.index >= V.total - 1 ? '已经是最后一张了' : '后面的照片等对方翻到再看');
+    else toast(V.index === 0 ? '已经是第一张了' : '前面的照片对方还没翻到');
+  }
+
+  // 自己翻看时分享者翻了页：不打断，只让“回到同步”按钮跳一下
+  function nudge() {
+    const button = $('#btn-resync');
+    button.classList.remove('is-nudged');
+    void button.offsetWidth;
+    button.classList.add('is-nudged');
+    wake();
   }
 
   function end(kind) {
@@ -113,6 +166,7 @@ export function startViewer(sessionId) {
     stage.clear();
     for (const url of photos.values()) URL.revokeObjectURL(url);
     photos.clear();
+    seen.clear();
     showNotice(
       kind === 'gone'
         ? { title: '链接已失效', text: '这次分享已经结束，或者链接不完整。请让对方重新给你二维码。' }
@@ -133,6 +187,12 @@ export function startViewer(sessionId) {
     $('#status .chip-text').textContent = text;
 
     $('#counter').textContent = V.index >= 0 ? `${V.index + 1} / ${V.total}` : '';
+    $('#btn-resync').hidden = V.following || V.host < 0;
+    $('#resync-text').textContent = `回到同步 · 第 ${V.host + 1} 张`;
+    $('#btn-prev').disabled = neighbor(-1) === null;
+    $('#btn-next').disabled = neighbor(1) === null;
+    $('#recv').classList.toggle('is-active', V.progress !== null);
+    $('#recv').style.setProperty('--progress', V.progress ?? 0);
 
     let wait = null;
     if (V.index < 0) {
@@ -145,14 +205,43 @@ export function startViewer(sessionId) {
     $('#placeholder-text').textContent = wait ?? '';
   }
 
-  // 一段时间没有变化后，悬浮信息淡出，让照片更突出
+  // 一段时间没有变化后，悬浮信息淡出，让照片更突出；点一下照片显示或隐藏
   function wake() {
     stageEl.classList.remove('is-idle');
     clearTimeout(idleTimer);
     idleTimer = setTimeout(() => stageEl.classList.add('is-idle'), 3000);
   }
-  stageEl.addEventListener('pointerdown', wake);
+  function rest() {
+    clearTimeout(idleTimer);
+    stageEl.classList.add('is-idle');
+  }
+  stageEl.addEventListener('pointermove', (e) => e.pointerType === 'mouse' && wake());
   stageEl.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  // 放大查看时把手势让给浏览器，用来拖动放大后的画面
+  const zoomed = () => (window.visualViewport?.scale ?? 1) > 1.01;
+  window.visualViewport?.addEventListener('resize', () => stage.frame.classList.toggle('is-zoomed', zoomed()));
+
+  bindSwipe(stage, {
+    canStep: (step) => neighbor(step) !== null,
+    step: go,
+    blocked,
+    tap: () => (stageEl.classList.contains('is-idle') ? wake() : rest()),
+    enabled: () => !zoomed() && V.index >= 0,
+  });
+  $('#btn-prev').addEventListener('click', () => go(-1));
+  $('#btn-next').addEventListener('click', () => go(1));
+  $('#btn-resync').addEventListener('click', () => display(V.host));
+  document.addEventListener('keydown', (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const step = { ArrowRight: 1, ArrowDown: 1, PageDown: 1, ArrowLeft: -1, ArrowUp: -1, PageUp: -1 }[e.key];
+    if (step) {
+      e.preventDefault();
+      go(step);
+    } else if ((e.key === 'Enter' || e.key === 'Escape') && !V.following && V.host >= 0 && e.target === document.body) {
+      display(V.host);
+    }
+  });
 
   const fullscreenButton = $('#btn-fullscreen');
   const root = document.documentElement;

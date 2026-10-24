@@ -1,4 +1,4 @@
-import { $, api, toast, showView, showNotice, keepScreenOn } from './util.js';
+import { $, api, toast, showView, showNotice, keepScreenOn, STALL_MS, CONNECT_HINT } from './util.js';
 import { subscribe } from './live.js';
 import { createStage, bindSwipe } from './stage.js';
 import { ViewerLink, randomId } from './rtc.js';
@@ -27,9 +27,11 @@ export function startViewer(sessionId) {
     total: 0,
     following: true, // 跟着分享者翻；自己翻到别处后为 false，直到回到分享者那一张
     hinted: false,
+    stalled: false, // 连了一阵还没连上，改为显示怎么解决
     ended: false,
   };
   let retryTimer = null;
+  let stallTimer = null;
   let idleTimer = null;
 
   const signal = (data) =>
@@ -48,6 +50,10 @@ export function startViewer(sessionId) {
           onEnd: () => end('ended'),
         });
         if (V.p2p !== 'open') retryLater(RETRY_MS);
+        stallTimer ??= setTimeout(() => {
+          V.stalled = true;
+          render();
+        }, STALL_MS);
       } else if (msg.type === 'signal') {
         V.link?.receive(msg.data);
       } else if (msg.type === 'ended') {
@@ -161,6 +167,7 @@ export function startViewer(sessionId) {
     if (V.ended) return;
     V.ended = true;
     clearTimeout(retryTimer);
+    clearTimeout(stallTimer);
     live.close();
     V.link?.reset();
     stage.clear();
@@ -197,7 +204,7 @@ export function startViewer(sessionId) {
     let wait = null;
     if (V.index < 0) {
       if (V.p2p === 'open') wait = receiving ? `正在接收照片 ${receiving}` : '已连上，等对方翻开第一张照片…';
-      else if (V.failures) wait = '暂时连不上对方，正在自动重试。也可以换个网络，或者连上对方手机的个人热点试试。';
+      else if (V.failures || V.stalled) wait = CONNECT_HINT;
       else if (V.link) wait = '正在连接对方…';
       else wait = '正在连接…';
     }

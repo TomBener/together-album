@@ -23,11 +23,6 @@ export default defineConfig({
 				exportName: "SessionRoom",
 			}),
 			ASSETS: bindings.assets(),
-			// TURN 中继密钥：cf workers secrets update 设置，用来为每次分享生成临时凭证
-			TURN_KEY_ID: bindings.secret(),
-			TURN_KEY_API_TOKEN: bindings.secret(),
-			// 每次开始分享都会领一组中继凭证，限制同一地址开新分享的频率，防止有人批量领取
-			CREATE_LIMIT: bindings.rateLimit({ namespace: "7301", simple: { limit: 6, period: 60 } }),
 		},
 		// 每个分享会话一个 Durable Object，用 SQLite 存储（免费计划可用）
 		exports: {

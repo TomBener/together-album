@@ -1,4 +1,4 @@
-import { $, api, toast, showView, showNotice, keepScreenOn, copyText } from './util.js';
+import { $, api, toast, showView, showNotice, keepScreenOn, copyText, STALL_MS, CONNECT_HINT } from './util.js';
 import { subscribe } from './live.js';
 import { createStage, bindSwipe } from './stage.js';
 import { prepareImage } from './images.js';
@@ -9,7 +9,7 @@ const MAX_PHOTOS = 100;
 const isTouch = matchMedia('(hover: none)').matches;
 const isApple = /iPhone|iPad|Macintosh/.test(navigator.userAgent); // iPad 的 UA 也自称 Macintosh
 
-// 照片只存在于这个页面的内存里，经 WebRTC 加密发给观看者（直连不通时经 TURN 中继转发），从不上传保存
+// 照片只存在于这个页面的内存里，直接经 WebRTC 发给观看者，从不上传服务器
 const S = {
   id: null,
   key: null,
@@ -31,6 +31,7 @@ let creating = false;
 let prepareChain = Promise.resolve(); // 逐张压缩，顺序与选择顺序一致
 let inviteSignature = '';
 let openBefore = 0;
+const stallHinted = new Set(); // 已经提示过“连不上”的观看者，每人只提示一次
 
 export function startHost() {
   document.body.classList.add('role-host');
@@ -135,6 +136,11 @@ function connectPeer(peerId) {
   });
   S.links.set(peerId, link);
   if (S.index >= 0) link.show(S.photos[S.index], S.index, S.photos.length);
+  setTimeout(() => {
+    if (S.ended || S.links.get(peerId) !== link || link.open || stallHinted.has(peerId)) return;
+    stallHinted.add(peerId);
+    toast(CONNECT_HINT, 8000);
+  }, STALL_MS);
 }
 
 function dropLink(peerId) {
@@ -347,7 +353,7 @@ function renderInvite() {
     );
     $('#invite-hint').textContent =
       join?.label === '公网'
-        ? ''
+        ? '两台设备连同一个 Wi‑Fi，并暂时关闭 VPN，翻看最流畅。'
         : join?.label === 'Tailscale'
           ? '这是 Tailscale 地址，只有登录了你的 Tailscale 的设备能打开。'
           : '朋友需要和你连同一个 Wi‑Fi。打不开的话换个地址，或用 npm run tunnel 启动公网模式。';
@@ -357,7 +363,7 @@ function renderInvite() {
   const done = S.photos.length;
   $('#upload').hidden = total === 0 || done === total;
   $('#upload-fill').style.width = `${total ? (done / total) * 100 : 0}%`;
-  $('#upload-text').textContent = `已准备 ${done} / ${total}`;
+  $('#upload-text').textContent = `正在处理照片 ${done} / ${total}`;
 }
 
 function bindControls() {

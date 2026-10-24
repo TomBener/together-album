@@ -2,6 +2,10 @@ export const $ = (selector) => document.querySelector(selector);
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// 迟迟连不上时给两端看的提示。开着 VPN 或网络不允许设备互连时直连会失败，面对面时换个网络最省事
+export const STALL_MS = 8000;
+export const CONNECT_HINT = '还没连上。请让两台设备连同一个 Wi‑Fi（或连上对方手机的热点）；开着 VPN 的话，请先暂时关闭。';
+
 export function showView(id) {
   for (const view of document.querySelectorAll('.view')) view.hidden = view.id !== id;
 }

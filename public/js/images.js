@@ -1,4 +1,4 @@
-const MAX_EDGE = 2048; // 手机、平板、笔记本全屏都够清晰，单张约 0.3–0.8 MB
+const MAX_EDGE = 2048; // 手机、平板、笔记本全屏都够清晰，单张约 0.3–1.2 MB（细节多的照片更大）
 const QUALITY = 0.85;
 const THUMB_EDGE = 200;
 

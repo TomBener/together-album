@@ -3,16 +3,25 @@ import assert from 'node:assert/strict';
 import WebSocket from 'ws';
 import { createApp } from '../server/app.js';
 
+// 默认测本地 Node 服务器；设置 TEST_BASE_URL 则对线上或 wrangler dev 中的 Worker 跑同一套测试
+const external = process.env.TEST_BASE_URL?.replace(/\/+$/, '');
 let app;
 let base;
+const sockets = new Set();
 
 before(async () => {
+  if (external) {
+    base = external;
+    return;
+  }
   app = createApp({ log: () => {}, iceServers: [] });
   await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${app.server.address().port}`;
 });
 
 after(() => {
+  for (const ws of sockets) ws.terminate();
+  if (!app) return;
   app.endAll('test');
   app.server.closeAllConnections();
   app.server.close();
@@ -29,6 +38,7 @@ const post = (path, body, key) =>
 function listen(path, options) {
   return new Promise((resolve) => {
     const ws = new WebSocket(base.replace('http', 'ws') + path, options);
+    sockets.add(ws);
     const queue = [];
     const waiters = [];
     const deliver = (msg) => {
@@ -45,6 +55,14 @@ function listen(path, options) {
           waiters.push({ type, resolve: ok });
           setTimeout(() => fail(new Error(`等待 ${type} 超时`)), ms).unref();
         });
+      },
+      /** 收到服务端的关闭帧即可（Workers 本地运行时不会立刻断开 TCP，'close' 事件要等很久）。 */
+      async closedWith(ms = 2000) {
+        for (const start = Date.now(); ws.readyState < WebSocket.CLOSING; ) {
+          if (Date.now() - start > ms) throw new Error('等待连接关闭超时');
+          await new Promise((r) => setTimeout(r, 20));
+        }
+        return ws._closeCode; // ws 在收到关闭帧时记录的状态码
       },
       close: () => ws.close(),
     });
@@ -65,7 +83,7 @@ test('完整流程：创建 → 加入 → 交换信令 → 结束', async () =>
   const { id, hostKey, joinUrls, ice } = await created.json();
   assert.match(id, /^[\w-]{22}$/);
   assert.ok(joinUrls.length >= 1 && joinUrls.every((j) => j.url.endsWith(`/v/${id}`)));
-  assert.deepEqual(ice, []);
+  assert.ok(Array.isArray(ice));
 
   const host = await listen(`/api/sessions/${id}/live?key=${hostKey}`);
   assert.deepEqual((await host.next('hello')).peers, []);
@@ -99,7 +117,7 @@ test('完整流程：创建 → 加入 → 交换信令 → 结束', async () =>
   assert.equal((await viewer2.next('ended')).reason, 'host');
   assert.equal((await host.next('ended')).reason, 'host');
   assert.equal((await fetch(`${base}/api/sessions/${id}`)).status, 404);
-  assert.equal((await viewer2.next('__closed')).code, 4000);
+  assert.equal(await viewer2.closedWith(), 4000);
   assert.equal((await listen(`/api/sessions/${id}/live?peer=viewer-cccccccccccccccc`)).status, 404);
 });
 
@@ -116,7 +134,9 @@ test('权限：没有密钥不能冒充分享者，陌生观看者不能发信�
   assert.equal((await fetch(`${base}/api/sessions/${id}`, { method: 'DELETE' })).status, 401);
   assert.equal((await listen(`/api/sessions/${id}/live?peer=bad`)).status, 400);
   // 别的网站的页面不能连上来
-  const foreign = await listen(`/api/sessions/${id}/live?peer=viewer-ffffffffffffffff`, { origin: 'https://evil.example' });
+  const foreign = await listen(`/api/sessions/${id}/live?peer=viewer-ffffffffffffffff`, {
+    origin: 'https://evil.example',
+  });
   assert.equal(foreign.status, 403);
   assert.equal((await post(`/api/sessions/${id}/signal`, { to: peer, data: {} }, hostKey)).status, 202);
   viewer.close();
@@ -133,8 +153,8 @@ test('同一观看者断线重连：替换旧连接，不重复计数', async ()
   const second = await listen(`/api/sessions/${id}/live?peer=${peer}`);
   await second.next('welcome');
   await host.next('peer-join');
-  assert.equal((await first.next('__closed')).code, 4001);
-  assert.equal(app.sessions.get(id).peers.size, 1);
+  assert.equal(await first.closedWith(), 4001);
+  if (app) assert.equal(app.sessions.get(id).peers.size, 1);
   // 旧连接关闭不应让分享者以为观看者离开了
   await assert.rejects(host.next('peer-leave', 300));
   second.close();

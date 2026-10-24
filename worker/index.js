@@ -4,7 +4,7 @@ import SvgTag from 'qrcode/lib/renderer/svg-tag.js';
 
 // 线上版本的信令服务器（Cloudflare Workers + Durable Objects），接口与 server/app.js 完全一致，前端无需区分。
 // 每个分享会话是一个 Durable Object：保存分享者密钥、管理双方的 WebSocket、转发建立直连的信令。
-// 照片走 WebRTC 点对点直传，不经过这里。
+// 照片走 WebRTC 点对点直传，不经过这里；直连不通时经 Cloudflare 的 TURN 中继转发，中继只见到加密后的数据。
 
 const HEARTBEAT_MS = 20_000; // 低于 Cloudflare 的 100 秒空闲断流
 const HOST_AWAY_MS = 60 * 60 * 1000; // 分享者离线超过 1 小时自动结束
@@ -14,6 +14,10 @@ const MAX_SIGNAL_BYTES = 64 * 1024;
 
 // STUN 只用来让设备知道自己的公网地址，不经手照片。可用 ICE_SERVERS 变量覆盖（JSON 数组）。
 const DEFAULT_ICE_SERVERS = [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] }];
+// 开着代理、在校园网或部分蜂窝网络里时直连常常不通，这时改走 TURN 中继。
+// 每次分享生成一组临时凭证，有效期比会话最长时长多一小时，会话结束时吊销。
+const TURN_API = 'https://rtc.live.cloudflare.com/v1/turn/keys';
+const TURN_TTL_S = MAX_AGE_MS / 1000 + 3600;
 
 const SECURITY_HEADERS = {
   'Content-Security-Policy':
@@ -37,6 +41,10 @@ export default {
 
     if (pathname === '/api/sessions' || pathname === '/api/sessions/') {
       if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+      const ip = request.headers.get('CF-Connecting-IP') ?? '';
+      if (env.CREATE_LIMIT && !(await env.CREATE_LIMIT.limit({ key: ip })).success) {
+        return json({ error: 'too_many_sessions' }, 429);
+      }
       const id = token(16);
       const session = await stubFor(env, id).create(id, url.origin);
       return json(session, 201);
@@ -67,12 +75,13 @@ export class SessionRoom extends DurableObject {
       id,
       hostKey: token(24),
       joinUrls: [{ label: '公网', url: `${origin}/v/${id}` }],
+      ice: await this.issueIceServers(),
       createdAt: now,
       hostSeenAt: now,
     };
     await this.ctx.storage.put('meta', meta);
     await this.ctx.storage.setAlarm(now + HOST_AWAY_MS);
-    return { id, hostKey: meta.hostKey, joinUrls: meta.joinUrls, ice: this.iceServers() };
+    return { id, hostKey: meta.hostKey, joinUrls: meta.joinUrls, ice: meta.ice };
   }
 
   async fetch(request) {
@@ -121,7 +130,7 @@ export class SessionRoom extends DurableObject {
       // 分享者（重新）连上时拿到完整名单，自行补连还没直连上的观看者
       send(server, { type: 'hello', peers: this.peerIds(), joinUrls: meta.joinUrls });
     } else {
-      send(server, { type: 'welcome', peerId, ice: this.iceServers() });
+      send(server, { type: 'welcome', peerId, ice: meta.ice ?? this.iceServers() });
       this.toHosts({ type: 'peer-join', peerId });
     }
     await this.scheduleHeartbeat();
@@ -207,6 +216,7 @@ export class SessionRoom extends DurableObject {
   }
 
   async end(reason) {
+    const meta = await this.ctx.storage.get('meta');
     for (const ws of this.ctx.getWebSockets()) {
       ws.serializeAttachment({ ...ws.deserializeAttachment(), gone: true });
       send(ws, { type: 'ended', reason });
@@ -214,6 +224,7 @@ export class SessionRoom extends DurableObject {
     }
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
+    await this.revokeTurn(meta?.ice);
   }
 
   // ---- 工具 ----
@@ -244,6 +255,42 @@ export class SessionRoom extends DurableObject {
       // 配置不合法时用默认值
     }
     return DEFAULT_ICE_SERVERS;
+  }
+
+  /** 生成这次分享专用的 TURN 临时凭证。没配置 TURN 密钥、用 ICE_SERVERS 覆盖或接口出错时只用 STUN。 */
+  async issueIceServers() {
+    const { TURN_KEY_ID: keyId, TURN_KEY_API_TOKEN: apiToken, ICE_SERVERS: custom } = this.env;
+    if (!keyId || !apiToken || custom) return this.iceServers();
+    try {
+      const res = await fetch(`${TURN_API}/${keyId}/credentials/generate-ice-servers`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ttl: TURN_TTL_S }),
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const { iceServers } = await res.json();
+      // 浏览器会拦截 53 端口，留着只会白等超时
+      return iceServers.map((s) => ({ ...s, urls: [s.urls].flat().filter((u) => !/:53(\?|$)/.test(u)) }));
+    } catch (err) {
+      console.error('TURN credentials unavailable, falling back to STUN:', err.message);
+      return this.iceServers();
+    }
+  }
+
+  async revokeTurn(ice) {
+    const username = ice?.find((s) => s.username)?.username;
+    const { TURN_KEY_ID: keyId, TURN_KEY_API_TOKEN: apiToken } = this.env;
+    if (!username || !keyId || !apiToken) return;
+    try {
+      await fetch(`${TURN_API}/${keyId}/credentials/${encodeURIComponent(username)}/revoke`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiToken}` },
+        signal: AbortSignal.timeout(3000),
+      });
+    } catch {
+      // 吊销失败也无妨，凭证到期自然失效
+    }
   }
 
   qr(url, meta) {

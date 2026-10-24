@@ -9,7 +9,7 @@ const MAX_PHOTOS = 100;
 const isTouch = matchMedia('(hover: none)').matches;
 const isApple = /iPhone|iPad|Macintosh/.test(navigator.userAgent); // iPad 的 UA 也自称 Macintosh
 
-// 照片只存在于这个页面的内存里，直接经 WebRTC 发给观看者，从不上传服务器
+// 照片只存在于这个页面的内存里，经 WebRTC 加密发给观看者（直连不通时经 TURN 中继转发），从不上传保存
 const S = {
   id: null,
   key: null,
@@ -68,7 +68,7 @@ async function onPick() {
     try {
       begin(await api('/api/sessions', { method: 'POST' }));
     } catch {
-      toast('连不上服务器，请确认打开的地址正确');
+      toast('网络不太好，请稍后再试');
       return;
     } finally {
       creating = false;
@@ -150,7 +150,7 @@ async function endSession() {
   } catch (err) {
     if (err.status !== 404) {
       button.disabled = false;
-      toast('没能连上服务器，请重试');
+      toast('网络不太好，请重试');
       return;
     }
   }
@@ -347,7 +347,7 @@ function renderInvite() {
     );
     $('#invite-hint').textContent =
       join?.label === '公网'
-        ? '公网链接：朋友用任何网络都能打开。连不上时，让朋友连你的个人热点再试。'
+        ? ''
         : join?.label === 'Tailscale'
           ? '这是 Tailscale 地址，只有登录了你的 Tailscale 的设备能打开。'
           : '朋友需要和你连同一个 Wi‑Fi。打不开的话换个地址，或用 npm run tunnel 启动公网模式。';

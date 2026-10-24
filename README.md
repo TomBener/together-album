@@ -1,6 +1,6 @@
 # 一起翻相册
 
-面对面分享照片的临时 Web App：分享者选好照片，朋友扫码在自己的屏幕上同步观看。照片通过 WebRTC 从分享者的浏览器**直接加密传到**朋友的浏览器，不上传服务器。
+面对面分享照片的临时 Web App：分享者选好照片，朋友扫码在自己的屏幕上同步观看。照片通过 WebRTC 从分享者的浏览器**加密传到**朋友的浏览器，不上传保存。能直连时点对点直传，直连不通时（开着代理、校园网、部分蜂窝网络）经 TURN 中继转发，中继只见到加密后的数据。
 
 线上地址：<https://album.example.com>
 
@@ -8,6 +8,8 @@
 
 ```
 分享者浏览器 ══ WebRTC 数据通道（DTLS 加密，点对点）══▶ 观看者浏览器
+      │  ╲                                              ╱  │
+      │   ╲═══ 直连不通时：经 TURN 中继转发（仍是密文）═══╱   │
       │                                                    │
       └──── WebSocket + HTTP：只交换连接信令（SDP/ICE）──────┘
                               │
@@ -15,7 +17,7 @@
 ```
 
 - **信令服务器**：只保存会话 ID、分享者密钥和在线名单，负责生成加入二维码、转发建立直连所需的信令，不经手照片。有两个实现，接口完全相同：
-  - 线上 `worker/index.js`：Cloudflare Workers + Durable Objects，每个会话一个 Durable Object，WebSocket 用休眠 API；
+  - 线上 `worker/index.js`：Cloudflare Workers + Durable Objects，每个会话一个 Durable Object，WebSocket 用休眠 API；创建会话时向 Cloudflare TURN 申请一组临时中继凭证（有效期 7 小时，会话结束时吊销），申请失败就只用 STUN。同一地址每分钟最多开 6 次新分享，防止有人批量领取中继凭证；
   - 本地 `server/app.js`：Node.js 原生 `http` + `ws` + `qrcode`，全在内存里，可以在没有外网的局域网里用。
 - **前端**：原生 JS 模块，无构建步骤。手机优先的响应式布局，两端共用一个页面。
 - **照片处理**：在分享者浏览器里缩到长边 2048 px 并重新编码为 JPEG。重新编码会去掉 EXIF（包括 GPS 位置），方向按 EXIF 摆正。
@@ -28,6 +30,7 @@
 | --- | --- |
 | 信令服务器（Cloudflare Workers 或本地 Node）、Cloudflare 隧道 | 连接信令（含双方 IP 地址），看不到照片 |
 | STUN 服务器（默认 Cloudflare、Google） | 你的公网 IP，看不到照片 |
+| TURN 中继（Cloudflare，仅在直连不通时使用） | 双方 IP 和传输的数据量；转发的是加密数据，看不到照片，也不保存 |
 | 照片内容 | 只有分享者和观看者的浏览器 |
 
 ## 部署（Cloudflare Workers）
@@ -40,6 +43,16 @@ cf auth login        # 第一次部署前登录
 npm run deploy       # 即 cf deploy：构建、上传并绑定 album.example.com
 npm run dev:worker   # 即 cf dev：在本机运行 Worker 版本（http://localhost:8787）
 ```
+
+TURN 中继用 Cloudflare Realtime 的 TURN 服务（每月 1000 GB 免费）。密钥存在 Worker 的 secret 里，`cloudflare.config.ts` 声明了它们，缺了会拒绝部署：
+
+```bash
+cf realtime turn keys create --name together-album        # 返回 uid 和 secret
+cf workers secrets update TURN_KEY_ID --worker together-album --type secret_text --text <uid>
+cf workers secrets update TURN_KEY_API_TOKEN --worker together-album --type secret_text --text <secret>
+```
+
+本机 `cf dev` 时把这两项写进 `.dev.vars`（已在 `.gitignore` 里）；不写也能跑，只是没有中继。
 
 ## 本地运行（Node 版）
 
@@ -67,7 +80,7 @@ npm run tunnel   # 附带一个临时公网 HTTPS 地址（需要 cloudflared）
 连不上时：
 
 - **页面打不开**（本地模式）：局域网模式要求两台设备连同一个 Wi‑Fi，而校园网、公司网经常禁止设备互相访问，这时改用线上地址或 `npm run tunnel`。
-- **页面打开了，但一直“正在建立直连”**：说明网络不允许两台设备直连（常见于设备隔离的 Wi‑Fi 或部分蜂窝网络）。让一台手机开个人热点、另一台连上，页面会自动重试。
+- **页面打开了，但一直“正在连接对方”**：说明两台设备之间连不通。线上版本会自动改走 TURN 中继，一般不会出现；本地 Node 版没有中继，常见于设备隔离的 Wi‑Fi、部分蜂窝网络，或者开着 Surge、Clash 这类接管全部流量的代理。可以让一台手机开个人热点、另一台连上，或暂时关掉代理，页面会自动重试。
 - 二维码下方可以切换地址（公网、Wi‑Fi、以太网、Tailscale）。
 
 ## 自动测试
@@ -84,7 +97,7 @@ WebRTC 部分需要浏览器，可以在一台电脑上开两个窗口测试：�
 
 ## 配置
 
-Node 版通过环境变量配置；Worker 版的 `ICE_SERVERS` 可以在 `cloudflare.config.ts` 的 `env` 里用 `bindings.text(...)` 设置。
+Node 版通过环境变量配置；Worker 版的 `ICE_SERVERS` 可以在 `cloudflare.config.ts` 的 `env` 里用 `bindings.text(...)` 设置，设置后不再申请 TURN 凭证。
 
 | 环境变量 | 作用 |
 | --- | --- |
@@ -97,7 +110,7 @@ Node 版通过环境变量配置；Worker 版的 `ICE_SERVERS` 可以在 `cloudf
 
 - 分享时分享者页面要留在前台。iOS 锁屏或切到别的 App 会断开直连，回来后自动重连。
 - 照片只在分享者页面的内存里，刷新分享页就等于结束分享。
-- 没有配置 TURN 时，部分网络组合下无法直连（见上面的个人热点办法）。
+- 本地 Node 版默认没有 TURN，部分网络组合下无法直连（见上面的个人热点办法）；需要的话用 `ICE_SERVERS` 自己配置。
 - 观看端禁用了长按存图，但防不了截图和拍屏。
 - 局域网 http 下浏览器不提供屏幕常亮和剪贴板接口，用隧道模式（HTTPS）可以解决。
 

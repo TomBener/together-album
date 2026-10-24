@@ -3,7 +3,7 @@ import { subscribe } from './live.js';
 import { createStage, bindSwipe } from './stage.js';
 import { ViewerLink, randomId } from './rtc.js';
 
-const RETRY_MS = 12_000; // 这么久还没直连上，就请分享者重新发起连接
+const RETRY_MS = 12_000; // 这么久还没连上，就请分享者重新发起连接
 const isTouch = matchMedia('(hover: none)').matches;
 
 export function startViewer(sessionId) {
@@ -178,10 +178,10 @@ export function startViewer(sessionId) {
     if (V.ended) return;
     const receiving = V.progress === null ? null : `${Math.round(V.progress * 100)}%`;
     let state = 'wait';
-    let text = '正在建立直连…';
-    if (V.p2p === 'open') [state, text] = ['live', receiving ? `正在接收 ${receiving}` : '直连 · 实时同步'];
+    let text = '正在连接…';
+    if (V.p2p === 'open') [state, text] = ['live', receiving ? `正在接收 ${receiving}` : '实时同步'];
     else if (V.p2p === 'disconnected') [state, text] = ['warn', '连接不稳，正在重连…'];
-    else if (V.failures) [state, text] = ['warn', '直连中断，正在重试…'];
+    else if (V.failures) [state, text] = ['warn', '连接中断，正在重试…'];
     else if (!V.link || V.signaling !== 'live') text = '正在连接…';
     $('#status').dataset.state = state;
     $('#status .chip-text').textContent = text;
@@ -197,8 +197,8 @@ export function startViewer(sessionId) {
     let wait = null;
     if (V.index < 0) {
       if (V.p2p === 'open') wait = receiving ? `正在接收照片 ${receiving}` : '已连上，等对方翻开第一张照片…';
-      else if (V.failures) wait = '暂时没能和对方的设备直接连上。请让两台设备连同一个 Wi‑Fi，或者连上对方手机的个人热点，这里会自动重试。';
-      else if (V.link) wait = '正在和对方的设备建立直连…';
+      else if (V.failures) wait = '暂时连不上对方，正在自动重试。也可以换个网络，或者连上对方手机的个人热点试试。';
+      else if (V.link) wait = '正在连接对方…';
       else wait = '正在连接…';
     }
     $('#placeholder').hidden = !wait;

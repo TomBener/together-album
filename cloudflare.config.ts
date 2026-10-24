@@ -7,8 +7,10 @@ export default defineConfig({
 		compatibilityDate: "2026-10-01",
 		compatibilityFlags: ["nodejs_compat"],
 		entrypoint: "worker/index.js",
+		// 日志里去掉查询参数：分享者密钥和观看者 id 都在 WebSocket 地址的查询参数里
 		observability: {
 			enabled: true,
+			redactQueryString: true,
 		},
 		// 首页、加入页和接口先经过 Worker，其余文件直接由静态资源返回
 		assets: {

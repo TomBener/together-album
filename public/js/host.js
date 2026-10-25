@@ -1,5 +1,5 @@
 import { $, api, toast, showView, showNotice, keepScreenOn, copyText, STALL_MS } from './util.js';
-import { t } from './i18n.js';
+import { t, langQuery } from './i18n.js';
 import { subscribe } from './live.js';
 import { createStage, bindSwipe } from './stage.js';
 import { prepareImage } from './images.js';
@@ -183,7 +183,7 @@ function finish(reason) {
     expired: t('endedExpired'),
     gone: t('endedGone'),
   }[reason];
-  showNotice({ title: t('shareEnded'), text, action: { label: t('shareAgain'), href: '/' } });
+  showNotice({ title: t('shareEnded'), text, action: { label: t('shareAgain'), href: `/${langQuery}` } });
 }
 
 // ---- 照片 ----

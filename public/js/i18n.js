@@ -1,4 +1,4 @@
-// 界面文字。按浏览器的语言偏好依次找中文或英文，都没有时用英文。
+// 界面文字。网址带 ?lang=en 或 ?lang=zh 时用指定的语言；否则按浏览器的语言偏好依次找中文或英文，都没有时用英文。
 // 页面里的静态文字用 data-i18n（文字）、data-i18n-label（aria-label）、data-i18n-alt（alt）标出键名，由 localize() 填上。
 
 const zh = {
@@ -177,15 +177,23 @@ const en = {
   connectingPeer: 'Connecting to the sharer…',
 };
 
-function pickLang() {
+function match(tag) {
+  if (/^zh\b/i.test(tag)) return 'zh';
+  if (/^en\b/i.test(tag)) return 'en';
+  return null;
+}
+
+function browserLang() {
   for (const tag of navigator.languages?.length ? navigator.languages : [navigator.language]) {
-    if (/^zh\b/i.test(tag)) return 'zh';
-    if (/^en\b/i.test(tag)) return 'en';
+    if (match(tag)) return match(tag);
   }
   return 'en';
 }
 
-export const lang = pickLang();
+const forced = match(new URLSearchParams(location.search).get('lang') ?? '');
+export const lang = forced ?? browserLang();
+// 页面内的链接带上它，指定过的语言不会在跳转后变回浏览器语言。发给朋友的加入链接不带，朋友按自己的浏览器
+export const langQuery = forced ? `?lang=${forced}` : '';
 const strings = lang === 'zh' ? zh : en;
 
 export function t(key, ...args) {

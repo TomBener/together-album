@@ -2,8 +2,6 @@
 
 面对面分享照片的临时 Web App：分享者选好照片，朋友扫码在自己的屏幕上同步观看，不用把手机递过去。不在一起时，把链接发过去，边通话边看也可以。照片通过 WebRTC 从分享者的浏览器**直接加密传到**朋友的浏览器，不上传服务器。
 
-线上地址：<https://album.example.com>
-
 ## 技术方案
 
 ```
@@ -32,12 +30,18 @@
 
 ## 部署（Cloudflare Workers）
 
-用 Cloudflare 的 `cf` CLI 部署，配置在 `cloudflare.config.ts`（Worker、Durable Object、自定义域名 `album.example.com`），静态资源目录在 `wrangler.config.ts`（`public/`）。Durable Object 使用 SQLite 存储，免费计划即可。
+用 Cloudflare 的 `cf` CLI 部署，配置在 `cloudflare.config.ts`（Worker、Durable Object、自定义域名），静态资源目录在 `wrangler.config.ts`（`public/`）。Durable Object 使用 SQLite 存储，免费计划即可。
+
+自定义域名写在项目根目录的 `.env` 里（已被 `.gitignore` 忽略，不会提交），域名要托管在同一个 Cloudflare 账号下；不写时只部署到 `workers.dev` 地址：
+
+```bash
+echo 'ALBUM_DOMAIN=album.example.com' > .env
+```
 
 ```bash
 npm install
 cf auth login        # 第一次部署前登录
-npm run deploy       # 即 cf deploy：构建、上传并绑定 album.example.com
+npm run deploy       # 即 cf deploy：构建、上传并绑定 .env 里的域名
 npm run dev:worker   # 即 cf dev：在本机运行 Worker 版本（http://localhost:8787）
 ```
 
@@ -57,7 +61,7 @@ npm run tunnel   # 附带一个临时公网 HTTPS 地址（需要 cloudflared）
 
 ## 用两台真实设备测试
 
-1. 用你的手机打开 <https://album.example.com>（或本地模式下扫终端里的二维码），这是分享者页面。
+1. 用你的手机打开部署好的线上地址（或本地模式下扫终端里的二维码），这是分享者页面。
 2. 点“选择照片，开始分享”，选几张照片。页面立即弹出加入二维码，照片在后台压缩。
 3. 朋友用手机相机扫这个二维码，浏览器里直接打开。也可以点二维码下方的“用隔空投送发给朋友”（安卓上是“发送链接”），通过系统分享面板把链接发过去；这个按钮只在 HTTPS 下出现。连上后两边左上角都显示“1 人在看”，朋友那边显示第一张照片。之后再有人加入，所有人的人数都会跟着变。
 4. 在你的手机上左右滑动（电脑上用方向键）翻页，朋友的屏幕跟着翻。
@@ -68,7 +72,7 @@ npm run tunnel   # 附带一个临时公网 HTTPS 地址（需要 cloudflared）
 
 - **页面打不开**（本地模式）：局域网模式要求两台设备连同一个 Wi‑Fi，而校园网、公司网经常禁止设备互相访问，这时改用线上地址或 `npm run tunnel`。
 - **页面打开了，但一直“正在连接对方”**：说明两台设备之间直连不通。最常见的原因是开着 VPN（Surge、Clash、Shadowrocket 等接管全部流量的代理），其次是设备隔离的 Wi‑Fi 或部分蜂窝网络。暂时关掉 VPN；在一起的话，也可以让一台手机开个人热点、另一台连上，页面会自动重试。连了 8 秒还没连上时，两端都会显示这条提示。
-- **为什么不加 TURN 中继**：试过 Cloudflare 的 TURN 中继，开着 VPN 也能连上，但照片要绕到海外再回来，实测每张要等 4–7 秒，面对面用很难接受，还要管理密钥和流量费用。所以只做直连，连不上时提示用户换网络。需要时可以从 git 历史（`13bec78`）恢复。
+- **为什么不加 TURN 中继**：试过 Cloudflare 的 TURN 中继，开着 VPN 也能连上，但照片要绕到海外再回来，实测每张要等 4–7 秒，面对面用很难接受，还要管理密钥和流量费用。所以只做直连，连不上时提示用户换网络。需要时可以从 git 历史里的“Relay through Cloudflare TURN when a direct connection fails”这次提交恢复。
 - 二维码下方可以切换地址（公网、Wi‑Fi、以太网、Tailscale）。
 
 ## 自动测试
@@ -76,7 +80,7 @@ npm run tunnel   # 附带一个临时公网 HTTPS 地址（需要 cloudflared）
 ```bash
 npm test                                          # 测本地 Node 版
 TEST_BASE_URL=http://localhost:8787 npm test      # 测 cf dev 中的 Worker 版
-TEST_BASE_URL=https://album.example.com npm test    # 测线上
+TEST_BASE_URL=https://album.example.com npm test  # 测线上
 ```
 
 两个版本跑同一套测试，覆盖信令服务器：创建会话、加入、双向转发信令、离开、结束后所有人收到通知并且链接失效；权限（没有密钥不能冒充分享者、观看者不能给别的观看者发信令、拒绝其他网站的连接）；同一观看者断线重连不重复计数；路径穿越。

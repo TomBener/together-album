@@ -1,6 +1,14 @@
 import { bindings, defineConfig, exports } from "cf/config";
 
 // 线上部署：cf deploy。静态资源目录在 wrangler.config.ts 里（public/）。
+// 自定义域名写在 .env 的 ALBUM_DOMAIN 里，不提交到仓库；没有时只用 workers.dev 地址。
+try {
+	process.loadEnvFile();
+} catch (error) {
+	if ((error as { code?: string }).code !== "ENOENT") throw error;
+}
+const domain = process.env.ALBUM_DOMAIN;
+
 export default defineConfig({
 	worker: {
 		name: "together-album",
@@ -16,7 +24,7 @@ export default defineConfig({
 		assets: {
 			runWorkerFirst: ["/", "/v/*", "/api/*", "/healthz"],
 		},
-		domains: ["album.example.com"],
+		domains: domain ? [domain] : [],
 		env: {
 			SESSIONS: bindings.durableObject({
 				worker: "together-album",

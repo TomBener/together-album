@@ -66,7 +66,7 @@ export class SessionRoom extends DurableObject {
     const meta = {
       id,
       hostKey: token(24),
-      joinUrls: [{ label: '公网', url: `${origin}/v/${id}` }],
+      joinUrls: [{ kind: 'public', url: `${origin}/v/${id}` }],
       createdAt: now,
       hostSeenAt: now,
     };

@@ -1,4 +1,5 @@
-import { $, api, toast, showView, showNotice, keepScreenOn, STALL_MS, CONNECT_HINT } from './util.js';
+import { $, api, toast, showView, showNotice, keepScreenOn, STALL_MS } from './util.js';
+import { t } from './i18n.js';
 import { subscribe } from './live.js';
 import { createStage, bindSwipe } from './stage.js';
 import { ViewerLink, randomId } from './rtc.js';
@@ -120,7 +121,7 @@ export function startViewer(sessionId) {
       else if (moved) nudge();
       if (!V.hinted && seen.size === 2) {
         V.hinted = true;
-        toast(isTouch ? '左右滑动可以回看之前的照片' : '用方向键可以回看之前的照片');
+        toast(t(isTouch ? 'lookBackTouch' : 'lookBackKeys'));
       }
     }
     render();
@@ -128,7 +129,7 @@ export function startViewer(sessionId) {
 
   // 超过之前的最多人数才提示有人加入：分享者从后台回来、大家陆续重连时人数也会一个个涨回去
   function onViewers(count) {
-    if (V.peak && count > V.peak) toast(`又有人加入了，现在 ${count} 人在看`);
+    if (V.peak && count > V.peak) toast(t('joined', count));
     V.viewers = count;
     V.peak = Math.max(V.peak, count);
     render();
@@ -161,8 +162,8 @@ export function startViewer(sessionId) {
 
   function blocked(step) {
     if (V.index < 0) return;
-    if (step > 0) toast(V.index >= V.total - 1 ? '已经是最后一张了' : '后面的照片等对方翻到再看');
-    else toast(V.index === 0 ? '已经是第一张了' : '前面的照片对方还没翻到');
+    if (step > 0) toast(t(V.index >= V.total - 1 ? 'lastPhoto' : 'laterNotYet'));
+    else toast(t(V.index === 0 ? 'firstPhoto' : 'earlierNotYet'));
   }
 
   // 自己翻看时分享者翻了页：不打断，只让“回到同步”按钮跳一下
@@ -187,8 +188,8 @@ export function startViewer(sessionId) {
     seen.clear();
     showNotice(
       kind === 'gone'
-        ? { title: '链接已失效', text: '这次分享已经结束，或者链接不完整。请让对方重新给你二维码。' }
-        : { title: '分享已结束', text: '照片已从这台设备上清除。' },
+        ? { title: t('linkGone'), text: t('linkGoneText') }
+        : { title: t('shareEnded'), text: t('clearedHere') },
     );
   }
 
@@ -196,17 +197,17 @@ export function startViewer(sessionId) {
     if (V.ended) return;
     const receiving = V.progress === null ? null : `${Math.round(V.progress * 100)}%`;
     let state = 'wait';
-    let text = '正在连接…';
-    if (V.p2p === 'open') [state, text] = ['live', receiving ? `正在接收 ${receiving}` : V.viewers ? `${V.viewers} 人在看` : '实时同步'];
-    else if (V.p2p === 'disconnected') [state, text] = ['warn', '连接不稳，正在重连…'];
-    else if (V.failures) [state, text] = ['warn', '连接中断，正在重试…'];
-    else if (!V.link || V.signaling !== 'live') text = '正在连接…';
+    let text = t('connecting');
+    if (V.p2p === 'open') [state, text] = ['live', receiving ? t('receiving', receiving) : V.viewers ? t('watching', V.viewers) : t('live')];
+    else if (V.p2p === 'disconnected') [state, text] = ['warn', t('unstable')];
+    else if (V.failures) [state, text] = ['warn', t('retrying')];
+    else if (!V.link || V.signaling !== 'live') text = t('connecting');
     $('#status').dataset.state = state;
     $('#status .chip-text').textContent = text;
 
     $('#counter').textContent = V.index >= 0 ? `${V.index + 1} / ${V.total}` : '';
     $('#btn-resync').hidden = V.following || V.host < 0;
-    $('#resync-text').textContent = `回到同步 · 第 ${V.host + 1} 张`;
+    $('#resync-text').textContent = t('backToLive', V.host + 1);
     $('#btn-prev').disabled = neighbor(-1) === null;
     $('#btn-next').disabled = neighbor(1) === null;
     $('#recv').classList.toggle('is-active', V.progress !== null);
@@ -214,10 +215,10 @@ export function startViewer(sessionId) {
 
     let wait = null;
     if (V.index < 0) {
-      if (V.p2p === 'open') wait = receiving ? `正在接收照片 ${receiving}` : '已连上，等对方翻开第一张照片…';
-      else if (V.failures || V.stalled) wait = CONNECT_HINT;
-      else if (V.link) wait = '正在连接对方…';
-      else wait = '正在连接…';
+      if (V.p2p === 'open') wait = receiving ? t('receivingPhoto', receiving) : t('waitingFirst');
+      else if (V.failures || V.stalled) wait = t('connectHint');
+      else if (V.link) wait = t('connectingPeer');
+      else wait = t('connecting');
     }
     $('#placeholder').hidden = !wait;
     $('#placeholder-text').textContent = wait ?? '';

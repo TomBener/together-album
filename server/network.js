@@ -48,7 +48,7 @@ export function lanAddresses() {
       const kind = classify(a.address);
       if (!kind) continue;
       const label = kind === 'tailscale' ? 'Tailscale' : (labels[iface] ?? iface);
-      out.push({ address: a.address, label, rank: rank(kind, label) });
+      out.push({ address: a.address, kind, label, rank: rank(kind, label) });
     }
   }
   return out.sort((x, y) => x.rank - y.rank);

@@ -1,4 +1,5 @@
-import { $, api, toast, showView, showNotice, keepScreenOn, copyText, STALL_MS, CONNECT_HINT } from './util.js';
+import { $, api, toast, showView, showNotice, keepScreenOn, copyText, STALL_MS } from './util.js';
+import { t } from './i18n.js';
 import { subscribe } from './live.js';
 import { createStage, bindSwipe } from './stage.js';
 import { prepareImage } from './images.js';
@@ -44,7 +45,7 @@ export function startHost() {
   if (saved) {
     sessionStorage.removeItem(STORE_KEY);
     api(`/api/sessions/${saved.id}`, { method: 'DELETE', key: saved.key }).catch(() => {});
-    toast('页面刷新后，上一次分享已结束');
+    toast(t('reloadEnded'));
   }
 }
 
@@ -69,7 +70,7 @@ async function onPick() {
     try {
       begin(await api('/api/sessions', { method: 'POST' }));
     } catch {
-      toast('网络不太好，请稍后再试');
+      toast(t('networkLater'));
       return;
     } finally {
       creating = false;
@@ -139,7 +140,7 @@ function connectPeer(peerId) {
   setTimeout(() => {
     if (S.ended || S.links.get(peerId) !== link || link.open || stallHinted.has(peerId)) return;
     stallHinted.add(peerId);
-    toast(CONNECT_HINT, 8000);
+    toast(t('connectHint'), 8000);
   }, STALL_MS);
 }
 
@@ -156,7 +157,7 @@ async function endSession() {
   } catch (err) {
     if (err.status !== 404) {
       button.disabled = false;
-      toast('网络不太好，请重试');
+      toast(t('networkRetry'));
       return;
     }
   }
@@ -178,11 +179,11 @@ function finish(reason) {
   S.items = [];
   S.photos = [];
   const text = {
-    self: '朋友屏幕上的照片已经清除，链接也已失效。',
-    expired: '分享时间过长或离开太久，已自动结束。',
-    gone: '这次分享已经结束，朋友屏幕上的照片已经清除。',
+    self: t('endedSelf'),
+    expired: t('endedExpired'),
+    gone: t('endedGone'),
   }[reason];
-  showNotice({ title: '分享已结束', text, action: { label: '再分享一组', href: '/' } });
+  showNotice({ title: t('shareEnded'), text, action: { label: t('shareAgain'), href: '/' } });
 }
 
 // ---- 照片 ----
@@ -190,7 +191,7 @@ function finish(reason) {
 function addFiles(files) {
   const room = MAX_PHOTOS - S.items.length;
   if (files.length > room) {
-    toast(`一次最多分享 ${MAX_PHOTOS} 张，多出的 ${files.length - room} 张没有加入`);
+    toast(t('tooMany', MAX_PHOTOS, files.length - room));
     files = files.slice(0, Math.max(0, room));
   }
   for (const file of files) {
@@ -213,7 +214,7 @@ function addItem() {
   const el = document.createElement('button');
   el.type = 'button';
   el.className = 'thumb is-pending';
-  el.setAttribute('aria-label', '正在准备');
+  el.setAttribute('aria-label', t('preparingThumb'));
   const img = document.createElement('img');
   img.alt = '';
   img.decoding = 'async';
@@ -236,7 +237,7 @@ function markReady(item, full, thumb) {
   });
   item.img.src = item.thumbUrl;
   item.el.classList.remove('is-pending');
-  item.el.setAttribute('aria-label', `第 ${item.index + 1} 张`);
+  item.el.setAttribute('aria-label', t('photoN', item.index + 1));
   if (S.index === -1) setIndex(0); // 第一张好了就直接展示，朋友扫码即可看到
   else broadcast(); // 总张数变了
   render();
@@ -246,7 +247,7 @@ function dropItem(item) {
   item.el.remove();
   S.items.splice(S.items.indexOf(item), 1);
   S.failed++;
-  toast(`有 ${S.failed} 张照片无法读取，已跳过`);
+  toast(t('unreadable', S.failed));
   render();
 }
 
@@ -255,7 +256,7 @@ function dropItem(item) {
 function go(index) {
   if (S.ended || index === S.index || index < 0) return;
   if (index >= S.photos.length) {
-    if (S.photos.length) toast(S.items.some((i) => !i.ready) ? '后面的照片还在准备中' : '已经是最后一张了');
+    if (S.photos.length) toast(t(S.items.some((i) => !i.ready) ? 'nextPreparing' : 'lastPhoto'));
     return;
   }
   setIndex(index);
@@ -291,30 +292,30 @@ function render() {
   const connecting = links.filter((l) => l.state === 'connecting' || l.state === 'new').length;
 
   let state = 'live';
-  let text = `${open} 人在看`;
+  let text = t('watching', open);
   if (!open) {
-    if (S.conn !== 'live') [state, text] = ['warn', S.conn === 'connecting' ? '正在连接…' : '连接中断，正在重连…'];
-    else if (connecting) [state, text] = ['wait', '朋友正在连接…'];
-    else [state, text] = ['wait', '等待朋友加入'];
+    if (S.conn !== 'live') [state, text] = ['warn', t(S.conn === 'connecting' ? 'connecting' : 'reconnecting')];
+    else if (connecting) [state, text] = ['wait', t('friendConnecting')];
+    else [state, text] = ['wait', t('waitingFriends')];
   }
   $('#status').dataset.state = state;
   $('#status .chip-text').textContent = text;
 
   if (open > openBefore) {
     if ($('#invite').open) $('#invite').close();
-    if (openBefore === 0) toast(isTouch ? '朋友已连上 · 左右滑动翻页' : '朋友已连上，用方向键或点两侧翻页');
-    else toast(`又有人加入了，现在 ${open} 人在看`);
+    if (openBefore === 0) toast(t(isTouch ? 'friendJoinedTouch' : 'friendJoinedMouse'));
+    else toast(t('joined', open));
   }
   openBefore = open;
 
   const pending = S.items.filter((i) => !i.ready).length;
   const parts = [];
   if (S.photos.length) parts.push(`${S.index + 1} / ${S.photos.length}`);
-  if (pending) parts.push(`正在准备 ${pending} 张`);
+  if (pending) parts.push(t('preparingCount', pending));
   $('#counter').textContent = parts.join(' · ');
 
   $('#placeholder').hidden = S.index >= 0;
-  $('#placeholder-text').textContent = '正在准备照片…';
+  $('#placeholder-text').textContent = t('preparingPhotos');
   $('#btn-prev').disabled = S.index <= 0;
   $('#btn-next').disabled = S.index >= S.photos.length - 1;
 
@@ -343,7 +344,7 @@ function renderInvite() {
       ...S.joinUrls.map((j, i) => {
         const button = document.createElement('button');
         button.type = 'button';
-        button.textContent = j.label;
+        button.textContent = addressLabel(j);
         button.setAttribute('aria-pressed', String(i === choice));
         button.addEventListener('click', () => {
           S.urlChoice = i;
@@ -352,19 +353,22 @@ function renderInvite() {
         return button;
       }),
     );
-    $('#invite-hint').textContent =
-      join?.label === '公网'
-        ? '开着 VPN 的话请先关掉；在一起时连同一个 Wi‑Fi 最流畅。'
-        : join?.label === 'Tailscale'
-          ? '这是 Tailscale 地址，只有登录了你的 Tailscale 的设备能打开。'
-          : '朋友需要和你连同一个 Wi‑Fi。打不开的话换个地址，或用 npm run tunnel 启动公网模式。';
+    $('#invite-hint').textContent = t(
+      join?.kind === 'public' ? 'hintPublic' : join?.kind === 'tailscale' ? 'hintTailscale' : 'hintLan',
+    );
   }
 
   const total = S.items.length;
   const done = S.photos.length;
   $('#upload').hidden = total === 0 || done === total;
   $('#upload-fill').style.width = `${total ? (done / total) * 100 : 0}%`;
-  $('#upload-text').textContent = `正在处理照片 ${done} / ${total}`;
+  $('#upload-text').textContent = t('processing', done, total);
+}
+
+// 公网、当前地址、本机这几种按界面语言显示；网卡名（Wi‑Fi、Ethernet）和 Tailscale 原样显示
+function addressLabel(join) {
+  const key = { public: 'addrPublic', current: 'addrCurrent', local: 'addrLocal' }[join.kind];
+  return key ? t(key) : join.label;
 }
 
 function bindControls() {
@@ -374,20 +378,20 @@ function bindControls() {
   $('#btn-invite').addEventListener('click', openInvite);
   $('#btn-start').addEventListener('click', () => {
     $('#invite').close();
-    if (isTouch && openBefore === 0) toast('左右滑动，或点按屏幕两侧翻页');
+    if (isTouch && openBefore === 0) toast(t('swipeHint'));
   });
-  $('#share-text').textContent = isApple ? '用隔空投送发给朋友' : '发送链接';
+  $('#share-text').textContent = t(isApple ? 'airdrop' : 'sendLink');
   $('#btn-share').addEventListener('click', async () => {
     try {
       // 只传链接：带上文字的话，隔空投送会把它当成一段备忘而不是直接打开网页
       await navigator.share({ url: $('#join-link').value });
     } catch (err) {
-      if (err.name !== 'AbortError') toast('没能打开分享，请复制链接发给朋友');
+      if (err.name !== 'AbortError') toast(t('shareFailed'));
     }
   });
   $('#btn-copy').addEventListener('click', async () => {
     const ok = await copyText($('#join-link').value, $('#join-link'));
-    toast(ok ? '链接已复制' : '复制失败，请长按链接手动复制');
+    toast(t(ok ? 'copied' : 'copyFailed'));
   });
   $('#btn-end').addEventListener('click', () => $('#confirm-end').showModal());
   $('#confirm-cancel').addEventListener('click', () => $('#confirm-end').close());

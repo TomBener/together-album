@@ -290,20 +290,22 @@ export function createApp({
 
   function joinUrlsFor(req, id) {
     const bases = [];
-    const add = (label, origin) => {
-      if (origin && !bases.some((b) => b.origin === origin)) bases.push({ label, origin });
+    // kind 给界面选显示的名称（public、current、local 按界面语言翻译）；网卡地址另带网卡名 label
+    const add = (kind, label, origin) => {
+      if (origin && !bases.some((b) => b.origin === origin)) bases.push({ kind, label, origin });
     };
     const lan = lanAddresses();
-    if (publicUrl) add('公网', publicUrl);
+    if (publicUrl) add('public', undefined, publicUrl);
     const origin = requestOrigin(req);
     if (origin && !isLoopback(origin)) {
       const { hostname } = new URL(origin);
-      add(lan.find((a) => a.address === hostname)?.label ?? '当前地址', origin);
+      const match = lan.find((a) => a.address === hostname);
+      add(match?.kind ?? 'current', match?.label, origin);
     }
     const port = server.address()?.port;
-    for (const a of lan) add(a.label, `http://${a.address}:${port}`);
-    if (!bases.length && origin) add('本机', origin); // 没有联网时至少能在本机测试
-    return bases.map((b) => ({ label: b.label, url: `${b.origin}/v/${id}` }));
+    for (const a of lan) add(a.kind, a.label, `http://${a.address}:${port}`);
+    if (!bases.length && origin) add('local', undefined, origin); // 没有联网时至少能在本机测试
+    return bases.map((b) => ({ kind: b.kind, label: b.label, url: `${b.origin}/v/${id}` }));
   }
 
   async function serveQr(res, s, url) {

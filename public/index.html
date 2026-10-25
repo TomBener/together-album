@@ -15,6 +15,7 @@
   <link rel="modulepreload" href="/js/host.js">
   <link rel="modulepreload" href="/js/viewer.js">
   <link rel="modulepreload" href="/js/util.js">
+  <link rel="modulepreload" href="/js/i18n.js">
   <link rel="modulepreload" href="/js/live.js">
   <link rel="modulepreload" href="/js/stage.js">
   <link rel="modulepreload" href="/js/images.js">
@@ -28,16 +29,16 @@
   <section class="view landing" id="landing" hidden>
     <div class="landing-inner">
       <div class="prints" aria-hidden="true"><span></span><span></span><span></span></div>
-      <h1>一起翻相册</h1>
-      <p class="lede">挑几张照片，朋友扫码就能在自己的屏幕上和你同步翻看，不用把手机递过去。不在身边的话，发个链接也行。</p>
+      <h1 data-i18n="appName"></h1>
+      <p class="lede" data-i18n="lede"></p>
       <label class="btn btn-primary btn-lg" for="picker">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v9a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 16.5z"/><path d="m4.5 16 4.2-4.2a1.5 1.5 0 0 1 2.1 0L15 16m-1.5-1.5 1.7-1.7a1.5 1.5 0 0 1 2.1 0l2.2 2.2"/><circle cx="15.5" cy="9.5" r="1.3"/></svg>
-        选择照片，开始分享
+        <span data-i18n="pick"></span>
       </label>
       <ul class="promises">
-        <li><strong>全程加密</strong>，不保存任何照片</li>
-        <li><strong>你翻到哪张，朋友才收到哪张</strong>，其余照片不会离开你的手机</li>
-        <li><strong>随时结束</strong>，朋友屏幕上的照片立即清除</li>
+        <li><strong data-i18n="promiseEncrypted"></strong><span data-i18n="promiseEncryptedMore"></span></li>
+        <li><strong data-i18n="promiseOnlyShown"></strong><span data-i18n="promiseOnlyShownMore"></span></li>
+        <li><strong data-i18n="promiseEnd"></strong><span data-i18n="promiseEndMore"></span></li>
       </ul>
     </div>
   </section>
@@ -47,16 +48,16 @@
     <div class="ambient" aria-hidden="true"><canvas width="32" height="32"></canvas><canvas width="32" height="32"></canvas></div>
     <div class="recv viewer-only" id="recv" aria-hidden="true"><i></i></div>
     <header class="bar bar-top">
-      <span class="chip" id="status" data-state="wait"><i class="dot"></i><span class="chip-text">正在连接…</span></span>
+      <span class="chip" id="status" data-state="wait"><i class="dot"></i><span class="chip-text" data-i18n="connecting"></span></span>
       <div class="actions host-only">
         <button type="button" class="btn btn-glass" id="btn-invite">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2v2h-2zM18 18h2v2h-2zM14 18h2v2h-2zM18 14h2v2h-2z"/></svg>
-          邀请
+          <span data-i18n="invite"></span>
         </button>
-        <button type="button" class="btn btn-glass btn-end" id="btn-end">结束</button>
+        <button type="button" class="btn btn-glass btn-end" id="btn-end" data-i18n="end"></button>
       </div>
       <div class="actions viewer-only">
-        <button type="button" class="btn btn-glass btn-icon" id="btn-fullscreen" aria-label="全屏" hidden>
+        <button type="button" class="btn btn-glass btn-icon" id="btn-fullscreen" data-i18n-label="fullscreen" hidden>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
         </button>
       </div>
@@ -67,23 +68,23 @@
       <img class="photo" alt="" draggable="false">
       <div class="placeholder" id="placeholder">
         <div class="spinner"></div>
-        <p id="placeholder-text">正在连接…</p>
+        <p id="placeholder-text"></p>
       </div>
     </div>
-    <button type="button" class="nav nav-prev" id="btn-prev" aria-label="上一张">
+    <button type="button" class="nav nav-prev" id="btn-prev" data-i18n-label="prev">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5-7 7 7 7"/></svg>
     </button>
-    <button type="button" class="nav nav-next" id="btn-next" aria-label="下一张">
+    <button type="button" class="nav nav-next" id="btn-next" data-i18n-label="next">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
     </button>
 
     <footer class="bar bar-bottom">
       <button type="button" class="btn btn-glass resync viewer-only" id="btn-resync" hidden>
-        <i class="dot"></i><span id="resync-text">回到同步</span>
+        <i class="dot"></i><span id="resync-text"></span>
       </button>
       <div class="counter" id="counter"></div>
       <div class="strip host-only" id="strip">
-        <label class="thumb thumb-add" for="picker" aria-label="添加照片">
+        <label class="thumb thumb-add" for="picker" data-i18n-label="addPhotos">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
         </label>
       </div>
@@ -102,32 +103,32 @@
 
   <dialog class="sheet" id="invite" aria-labelledby="invite-title">
     <div class="sheet-grip" aria-hidden="true"></div>
-    <h2 id="invite-title">让朋友扫码加入</h2>
-    <p class="sheet-sub">用相机扫一扫，浏览器里直接打开，不用装 App；朋友不在身边的话，把下面的链接发过去。分享时请让本页面留在前台。</p>
-    <div class="qr"><img id="qr" alt="加入分享的二维码"></div>
-    <div class="segmented" id="addr-switch" role="group" aria-label="二维码使用的地址" hidden></div>
+    <h2 id="invite-title" data-i18n="inviteTitle"></h2>
+    <p class="sheet-sub" data-i18n="inviteSub"></p>
+    <div class="qr"><img id="qr" alt="" data-i18n-alt="qrAlt"></div>
+    <div class="segmented" id="addr-switch" role="group" data-i18n-label="addrSwitch" hidden></div>
     <button type="button" class="btn btn-quiet btn-share" id="btn-share" hidden>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14.5V4m0 0L8.5 7.5M12 4l3.5 3.5"/><path d="M8.5 10.5h-2A1.5 1.5 0 0 0 5 12v6.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V12a1.5 1.5 0 0 0-1.5-1.5h-2"/></svg>
-      <span id="share-text">发送链接</span>
+      <span id="share-text"></span>
     </button>
     <div class="link-row">
-      <input id="join-link" readonly aria-label="加入链接">
-      <button type="button" class="btn btn-quiet" id="btn-copy">复制</button>
+      <input id="join-link" readonly data-i18n-label="joinLink">
+      <button type="button" class="btn btn-quiet" id="btn-copy" data-i18n="copy"></button>
     </div>
     <div class="upload" id="upload" hidden>
       <div class="upload-bar"><i id="upload-fill"></i></div>
       <span id="upload-text"></span>
     </div>
     <p class="hint" id="invite-hint"></p>
-    <button type="button" class="btn btn-primary" id="btn-start" autofocus>开始翻看</button>
+    <button type="button" class="btn btn-primary" id="btn-start" data-i18n="start" autofocus></button>
   </dialog>
 
   <dialog class="sheet sheet-small" id="confirm-end" aria-labelledby="confirm-title">
-    <h2 id="confirm-title">结束这次分享？</h2>
-    <p class="sheet-sub">朋友屏幕上的照片会立即清除，链接随之失效。</p>
+    <h2 id="confirm-title" data-i18n="confirmTitle"></h2>
+    <p class="sheet-sub" data-i18n="confirmSub"></p>
     <div class="sheet-actions">
-      <button type="button" class="btn btn-quiet" id="confirm-cancel">再看看</button>
-      <button type="button" class="btn btn-danger" id="confirm-ok">结束分享</button>
+      <button type="button" class="btn btn-quiet" id="confirm-cancel" data-i18n="confirmCancel"></button>
+      <button type="button" class="btn btn-danger" id="confirm-ok" data-i18n="confirmOk"></button>
     </div>
   </dialog>
 

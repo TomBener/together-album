@@ -2,9 +2,8 @@ export const $ = (selector) => document.querySelector(selector);
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// 迟迟连不上时给两端看的提示。开着 VPN 或网络不允许设备互连时直连会失败，先关 VPN，在一起时也可以换到同一个网络
+// 连了这么久还没连上，就给两端看怎么解决（i18n 的 connectHint）。开着 VPN 或网络不允许设备互连时直连会失败
 export const STALL_MS = 8000;
-export const CONNECT_HINT = '还没连上。开着 VPN 的话，请先暂时关闭；在一起时，也可以连同一个 Wi‑Fi 或对方手机的热点。';
 
 export function showView(id) {
   for (const view of document.querySelectorAll('.view')) view.hidden = view.id !== id;

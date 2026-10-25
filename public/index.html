@@ -11,6 +11,14 @@
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css">
   <script type="module" src="/js/main.js"></script>
+  <!-- 模块一层层 import，不预载的话要等上一层下载完才知道下一层；跨洋访问时每一层都要多等一个往返 -->
+  <link rel="modulepreload" href="/js/host.js">
+  <link rel="modulepreload" href="/js/viewer.js">
+  <link rel="modulepreload" href="/js/util.js">
+  <link rel="modulepreload" href="/js/live.js">
+  <link rel="modulepreload" href="/js/stage.js">
+  <link rel="modulepreload" href="/js/images.js">
+  <link rel="modulepreload" href="/js/rtc.js">
 </head>
 <body>
   <!-- 两个入口共用的文件选择框，放在 body 下以保证 iOS 能从任何地方唤起 -->

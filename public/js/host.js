@@ -287,6 +287,7 @@ function render() {
   if (S.ended) return;
   const links = [...S.links.values()];
   const open = links.filter((l) => l.open).length;
+  for (const link of links) link.setViewers(open);
   const connecting = links.filter((l) => l.state === 'connecting' || l.state === 'new').length;
 
   let state = 'live';

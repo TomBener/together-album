@@ -3,6 +3,7 @@
 // 通道上的消息（按顺序、可靠送达）：
 //   { t: 'photo', id, size, type } 后面紧跟若干个二进制分片，合计 size 字节
 //   { t: 'show', id, index, total } 展示某张已送达的照片
+//   { t: 'viewers', count } 现在有几人在看（含对方自己），和分享者那边显示的人数一致
 //   { t: 'end' } 分享结束
 
 const CHUNK = 16 * 1024; // 各浏览器都能稳定收发的分片大小（Safari 的上限比 Chrome 小）
@@ -133,6 +134,17 @@ export class HostLink {
     });
   }
 
+  /** 告诉对方现在有几人在看。按条记住发过的数，换了新连接的观看者即使总数没变也会收到。 */
+  setViewers(count) {
+    if (!this.open || this.viewers === count) return;
+    try {
+      this.channel.send(JSON.stringify({ t: 'viewers', count }));
+      this.viewers = count;
+    } catch {
+      // 已断开
+    }
+  }
+
   /** 告诉对方分享结束（对方会立即清除照片），然后断开。 */
   end() {
     try {
@@ -152,10 +164,10 @@ export class HostLink {
 
 /** 观看者这一端：接受分享者的连接，收照片和翻页指令。 */
 export class ViewerLink {
-  constructor({ iceServers, signal, onState, onPhoto, onShow, onProgress, onEnd }) {
+  constructor({ iceServers, signal, onState, onPhoto, onShow, onViewers, onProgress, onEnd }) {
     this.iceServers = iceServers;
     this.signal = signal;
-    this.on = { onState, onPhoto, onShow, onProgress, onEnd };
+    this.on = { onState, onPhoto, onShow, onViewers, onProgress, onEnd };
     this.pc = null;
     this.linkId = null;
     this.pending = [];
@@ -209,6 +221,8 @@ export class ViewerLink {
           incoming = msg.size > 0 && msg.size <= MAX_PHOTO_BYTES ? { ...msg, chunks: [], received: 0 } : null;
         } else if (msg.t === 'show') {
           this.on.onShow(msg);
+        } else if (msg.t === 'viewers') {
+          this.on.onViewers(msg.count);
         } else if (msg.t === 'end') {
           this.on.onEnd();
         }

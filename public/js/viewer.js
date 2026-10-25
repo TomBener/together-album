@@ -25,6 +25,8 @@ export function startViewer(sessionId) {
     index: -1, // 这台设备正在看的
     host: -1, // 分享者正在看的
     total: 0,
+    viewers: 0, // 几人在看，由分享者告知
+    peak: 0, // 这次分享里最多同时几人在看
     following: true, // 跟着分享者翻；自己翻到别处后为 false，直到回到分享者那一张
     hinted: false,
     stalled: false, // 连了一阵还没连上，改为显示怎么解决
@@ -46,6 +48,7 @@ export function startViewer(sessionId) {
           onState,
           onPhoto,
           onShow,
+          onViewers,
           onProgress,
           onEnd: () => end('ended'),
         });
@@ -123,6 +126,14 @@ export function startViewer(sessionId) {
     render();
   }
 
+  // 超过之前的最多人数才提示有人加入：分享者从后台回来、大家陆续重连时人数也会一个个涨回去
+  function onViewers(count) {
+    if (V.peak && count > V.peak) toast(`又有人加入了，现在 ${count} 人在看`);
+    V.viewers = count;
+    V.peak = Math.max(V.peak, count);
+    render();
+  }
+
   function display(index) {
     const direction = V.index === -1 ? 0 : Math.sign(index - V.index);
     V.index = index;
@@ -186,7 +197,7 @@ export function startViewer(sessionId) {
     const receiving = V.progress === null ? null : `${Math.round(V.progress * 100)}%`;
     let state = 'wait';
     let text = '正在连接…';
-    if (V.p2p === 'open') [state, text] = ['live', receiving ? `正在接收 ${receiving}` : '实时同步'];
+    if (V.p2p === 'open') [state, text] = ['live', receiving ? `正在接收 ${receiving}` : V.viewers ? `${V.viewers} 人在看` : '实时同步'];
     else if (V.p2p === 'disconnected') [state, text] = ['warn', '连接不稳，正在重连…'];
     else if (V.failures) [state, text] = ['warn', '连接中断，正在重试…'];
     else if (!V.link || V.signaling !== 'live') text = '正在连接…';

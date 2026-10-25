@@ -353,7 +353,7 @@ function renderInvite() {
     );
     $('#invite-hint').textContent =
       join?.label === '公网'
-        ? '两台设备连同一个 Wi‑Fi，并暂时关闭 VPN，翻看最流畅。'
+        ? '开着 VPN 的话请先关掉；在一起时连同一个 Wi‑Fi 最流畅。'
         : join?.label === 'Tailscale'
           ? '这是 Tailscale 地址，只有登录了你的 Tailscale 的设备能打开。'
           : '朋友需要和你连同一个 Wi‑Fi。打不开的话换个地址，或用 npm run tunnel 启动公网模式。';

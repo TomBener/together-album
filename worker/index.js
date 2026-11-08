@@ -51,7 +51,15 @@ export default {
     if (pathname === '/' || VIEWER_PAGE.test(pathname)) {
       // 静态资源默认把 /index.html 重定向到 /，所以直接取 /
       const page = await env.ASSETS.fetch(new Request(new URL('/', url), request));
-      return withHeaders(new Response(page.body, page), { 'Cache-Control': 'no-cache' });
+      // 分享卡片的缩略图要写完整网址，有的抓取方不认相对路径
+      const withImage = new HTMLRewriter()
+        .on('meta[property="og:image"]', {
+          element(el) {
+            el.setAttribute('content', new URL(el.getAttribute('content'), url.origin).href);
+          },
+        })
+        .transform(page);
+      return withHeaders(new Response(withImage.body, withImage), { 'Cache-Control': 'no-cache' });
     }
     return env.ASSETS.fetch(request);
   },

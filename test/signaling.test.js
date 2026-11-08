@@ -165,6 +165,12 @@ test('页面与二维码', async () => {
   const page = await fetch(`${base}/v/${id}`);
   assert.equal(page.status, 200);
   assert.match(page.headers.get('content-security-policy'), /default-src 'self'/);
+  // 分享卡片的缩略图：完整网址，且能取到
+  const image = (await page.text()).match(/<meta property="og:image" content="([^"]*)"/)?.[1];
+  assert.match(image ?? '', /^https?:\/\/[^/]+\/share\.png$/);
+  const png = await fetch(image);
+  assert.equal(png.status, 200);
+  assert.equal(png.headers.get('content-type'), 'image/png');
   const qr = await fetch(`${base}/api/sessions/${id}/qr?u=0`);
   assert.equal(qr.headers.get('content-type'), 'image/svg+xml');
   assert.match(await qr.text(), /^<svg/);

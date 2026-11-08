@@ -8,7 +8,15 @@
   <meta name="referrer" content="no-referrer">
   <meta name="robots" content="noindex">
   <title>一起翻相册</title>
+  <!-- 分享到微信、iMessage 等时生成卡片用。og:image 由服务器补成完整网址 -->
+  <meta name="description" content="挑几张照片，朋友扫码就能在自己的屏幕上和你同步翻看，不用把手机递过去。">
+  <meta property="og:title" content="一起翻相册">
+  <meta property="og:description" content="挑几张照片，朋友扫码就能在自己的屏幕上和你同步翻看，不用把手机递过去。">
+  <meta property="og:image" content="/share.png">
+  <meta property="og:image:width" content="600">
+  <meta property="og:image:height" content="600">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <link rel="stylesheet" href="/style.css">
   <script type="module" src="/js/main.js"></script>
   <!-- 模块一层层 import，不预载的话要等上一层下载完才知道下一层；跨洋访问时每一层都要多等一个往返 -->

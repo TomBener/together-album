@@ -31,6 +31,7 @@ const MIME = {
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml',
+  '.png': 'image/png',
 };
 
 const BASE_HEADERS = {
@@ -106,7 +107,7 @@ export function createApp({
     if (pathname.startsWith('/api/')) return handleApi(req, res, url);
     if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'method_not_allowed');
     if (pathname === '/healthz') return sendText(res, 200, 'ok');
-    if (pathname === '/' || VIEWER_PAGE.test(pathname)) return serveStatic(req, res, '/index.html');
+    if (pathname === '/' || VIEWER_PAGE.test(pathname)) return serveStatic(req, res, '/index.html', shareImageFor(req));
     return serveStatic(req, res, pathname);
   }
 
@@ -328,7 +329,15 @@ export function createApp({
 
   // ---- 静态文件 ----
 
-  async function serveStatic(req, res, pathname) {
+  // 分享卡片的缩略图要写完整网址，有的抓取方不认相对路径
+  function shareImageFor(req) {
+    const origin = requestOrigin(req) ?? publicUrl;
+    if (!origin) return null;
+    return (html) =>
+      html.replace(/(<meta property="og:image" content=")([^"]*)"/, (_, start, src) => `${start}${new URL(src, origin).href}"`);
+  }
+
+  async function serveStatic(req, res, pathname, rewrite = null) {
     let file;
     try {
       file = path.join(PUBLIC_DIR, decodeURIComponent(pathname));
@@ -340,6 +349,7 @@ export function createApp({
     let data;
     try {
       data = await readFile(file);
+      if (rewrite) data = Buffer.from(rewrite(data.toString('utf8')));
     } catch {
       throw new HttpError(404, 'not_found');
     }

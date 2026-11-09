@@ -33,6 +33,16 @@
 | TURN 中继（Cloudflare，仅在直连不通时使用） | 双方 IP 和传输的数据量；转发的是加密数据，看不到照片，也不保存 |
 | 照片内容 | 只有分享者和观看者的浏览器（分享者那边分享期间加密暂存，见上）。观看者的浏览器里还有提前送到、但没有钥匙打不开的后面几张 |
 
+## 开源与审计
+
+本项目以 AGPL-3.0 许可证开源（见 `LICENSE`）。网页没有构建步骤：线上提供的 `public/` 下的文件和仓库里的一模一样，可以直接对照，比如：
+
+```bash
+curl -s https://album.example.com/js/rtc.js | diff - public/js/rtc.js   # 没有输出就是一样
+```
+
+照片不上传、加密、翻到才发钥匙，都由浏览器端的这些文件实现。信令服务器（`worker/index.js`）只转发建立连接用的信令，经手不了照片。
+
 ## 部署（Cloudflare Workers）
 
 用 Cloudflare 的 `cf` CLI 部署，配置在 `cloudflare.config.ts`（Worker、Durable Object、自定义域名），静态资源目录在 `wrangler.config.ts`（`public/`）。Durable Object 使用 SQLite 存储，免费计划即可。

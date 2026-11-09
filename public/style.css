@@ -302,6 +302,22 @@ h1 {
   color: var(--ink-2);
 }
 
+/* 源代码链接：方便别人审计 */
+.source {
+  margin: 20px 0 0;
+  font-size: 13px;
+}
+
+.source a {
+  color: var(--ink-3);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.source a:hover {
+  color: var(--ink-2);
+}
+
 /* 一叠洗出来的照片，呼应“纸质相册” */
 .prints {
   position: relative;

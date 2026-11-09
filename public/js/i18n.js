@@ -41,7 +41,8 @@ const zh = {
   faq5q: '为什么连不上，或者照片出来得慢？',
   faq5a: '两台设备能直连时最快。开着 VPN，或者在校园网、手机网络里时，常常要经服务器中转。中转时先显示一张小图，清楚的随后换上。暂时关掉 VPN 通常会快一些。',
   faq6q: '朋友会提前收到我还没翻到的照片吗？',
-  faq6a: '会提前收到后面两三张，但打不开。为了翻页不用等，你翻到一张时，后面几张会先加密发到朋友的设备上。每张照片有自己的钥匙，你翻到哪张，才把那张的钥匙发过去。没翻到的照片，朋友那边只有打不开的数据，分享结束时随页面清除。',
+  sourceCode: '源代码（GitHub）',
+  faq6a: '会提前收到后面两三张，但打不开。为了翻页不用等，后面几张会先加密发过去。你翻到哪张，朋友才能打开哪张。没翻到的照片，分享结束时一起清除。',
 
   connecting: '正在连接…',
   watching: (n) => `${n} 人在看`,
@@ -156,7 +157,8 @@ const en = {
   faq5q: 'Why can’t we connect, or why are photos slow?',
   faq5a: 'A direct connection between the two devices is fastest. On a VPN, a campus network or mobile data, the devices often connect through a relay instead. Through a relay, a small preview shows first and the sharp photo replaces it a moment later. Turning off your VPN for a while usually helps.',
   faq6q: 'Do my friends get photos I haven’t flipped to yet?',
-  faq6a: 'They get the next two or three early, but they can’t open them. So that flipping feels instant, the next few photos are sent to your friends’ devices ahead of time, encrypted. Each photo has its own key, and a photo’s key is sent only when you flip to it. Photos you never flip to stay as data your friends can’t open, and they’re cleared with the page when the share ends.',
+  sourceCode: 'Source code on GitHub',
+  faq6a: 'They get the next two or three early, but they can’t open them. So that flipping feels instant, the next few photos are sent ahead, encrypted. Your friends can open a photo only once you flip to it. Photos you never flip to are cleared when the share ends.',
 
   connecting: 'Connecting…',
   watching: (n) => `${n} watching`,

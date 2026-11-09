@@ -6,6 +6,7 @@ import { ViewerLink, randomId } from './rtc.js';
 import { unseal, fromBase64 } from './seal.js';
 
 const RETRY_MS = 15_000; // 这么久还没连上，就请分享者重新发起连接
+const KINDS = ['preview', 'full', 'large']; // 一张照片的几个版本，越往后越清楚
 const AWAY_DELAY_MS = 4000; // 分享者的信令断开这么久还没回来，才算“暂时离开”；常见的短暂断线不必惊动观看者
 const isTouch = matchMedia('(hover: none)').matches;
 
@@ -30,7 +31,7 @@ export function startViewer(sessionId) {
     host: -1, // 分享者正在看的
     hostId: null,
     shownId: null, // 舞台上这张照片的 id
-    shownKind: null, // 舞台上是预览（preview）还是原画质（full）
+    shownKind: null, // 舞台上是预览（preview）、原画质（full）还是大一档的（large）
     total: 0,
     viewers: 0, // 几人在看，由分享者告知
     peak: 0, // 这次分享里最多同时几人在看
@@ -164,11 +165,12 @@ export function startViewer(sessionId) {
     render();
   }
 
-  // 只显示分享者正在看的这张的进度；提前发的照片在后台传，不显示
+  // 只显示分享者正在看的这张的进度；提前发的照片在后台传，不显示。
+  // 大一档的排在原画质后面发，换上时不显示进度
   function onProgress({ id, kind, fraction }) {
-    if (id !== V.hostId || !V.following) return;
+    if (id !== V.hostId || !V.following || kind === 'large') return;
     const p = pics.get(id);
-    if (!p || p.urls.full || (kind === 'preview' && p.urls.preview)) return;
+    if (!p || KINDS.indexOf(kind) <= KINDS.indexOf(bestKind(p))) return;
     V.progress = fraction;
     render();
   }
@@ -178,20 +180,26 @@ export function startViewer(sessionId) {
     if (!p) pics.set(id, (p = { index: -1, secret: null, parts: {}, urls: {}, chain: Promise.resolve() }));
     return p;
   };
-  const bestUrl = (p) => p?.urls.full ?? p?.urls.preview;
+  // 不用 findLast：iOS 15.4 以前的 Safari 和微信里没有
+  const bestKind = (p) => (p ? KINDS.filter((kind) => p.urls[kind]).pop() : undefined);
+  const bestUrl = (p) => p?.urls[bestKind(p)];
 
-  // 已经能显示的照片。连接断了又连上时告诉分享者，不必重发
+  // 已经能显示的照片，连接断了又连上时告诉分享者，不必重发。
+  // 还有这块屏幕全屏看照片时照片长边要多少像素：短边的 1.5 倍（3:2 的照片），不超过长边。
+  // Mac、iPad 这类大屏幕超过原画质（2048 px）、两边又直连时，分享者给正在看的那张补发大一档的
   function have() {
     const parts = [];
-    for (const [id, p] of pics) for (const kind of ['preview', 'full']) if (p.urls[kind]) parts.push(`${id}:${kind}`);
-    return parts;
+    for (const [id, p] of pics) for (const kind of KINDS) if (p.urls[kind]) parts.push(`${id}:${kind}`);
+    const w = screen.width * devicePixelRatio;
+    const h = screen.height * devicePixelRatio;
+    return { parts, need: Math.round(Math.min(Math.max(w, h), Math.min(w, h) * 1.5)) };
   }
 
   // 收到一张照片的预览或原画质。分享者已经翻到这张（有钥匙）就打开，否则先存着
   function onPart({ id, kind, type, iv, data }) {
     if (V.ended) return;
     const p = pic(id);
-    if (p.urls[kind]) return;
+    if (KINDS.indexOf(kind) <= KINDS.indexOf(bestKind(p))) return; // 已经有同样或更清楚的
     p.parts[kind] = { type, iv, data };
     unlock(id);
   }
@@ -199,7 +207,7 @@ export function startViewer(sessionId) {
   // 有钥匙（或本来没加密）的数据解开，生成能显示的地址
   function unlock(id) {
     const p = pics.get(id);
-    for (const kind of ['preview', 'full']) {
+    for (const kind of KINDS) {
       const part = p.parts[kind];
       if (!part || (part.iv && !p.secret)) continue;
       p.parts[kind] = null;
@@ -251,13 +259,13 @@ export function startViewer(sessionId) {
     const p = pics.get(id);
     if (p.index < 0) return; // 分享者还没翻到这张
     if (id === V.shownId) {
-      if (kind === 'full' && V.shownKind !== 'full') sharpen();
+      if (KINDS.indexOf(kind) > KINDS.indexOf(V.shownKind)) sharpen();
     } else if (id === V.hostId) {
       reveal(id, false);
     } else if (!seen.has(p.index)) {
       seen.set(p.index, id); // 分享者翻过、没停留的照片，之后也能回看
     }
-    if (id === V.hostId && p.urls.full) V.progress = null;
+    if (id === V.hostId && kind !== 'preview') V.progress = null;
     render();
   }
 
@@ -274,12 +282,13 @@ export function startViewer(sessionId) {
     }
   }
 
-  // 舞台上的预览换成原画质，原地淡入
+  // 舞台上这张换成更清楚的版本，原地淡入
   function sharpen() {
-    const url = pics.get(V.shownId)?.urls.full;
-    if (!url) return;
-    V.shownKind = 'full';
-    stage.show(url, 0, { swap: true });
+    const p = pics.get(V.shownId);
+    const kind = bestKind(p);
+    if (!kind || kind === V.shownKind) return;
+    V.shownKind = kind;
+    stage.show(p.urls[kind], 0, { swap: true });
   }
 
   // 超过之前的最多人数才提示有人加入：分享者从后台回来、大家陆续重连时人数也会一个个涨回去
@@ -299,7 +308,7 @@ export function startViewer(sessionId) {
     const swap = id === V.shownId; // 同一张从预览换成原画质
     V.index = index;
     V.shownId = id;
-    V.shownKind = p.urls.full ? 'full' : 'preview';
+    V.shownKind = bestKind(p);
     V.following = index === V.host;
     stage.show(url, swap ? 0 : direction, { swap });
     wake();

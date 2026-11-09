@@ -7,20 +7,22 @@
 //   分享者 → 观看者 { t: 'show', id, index, total, key } 翻到了哪张；key 是这张照片的钥匙（不能加密时没有）
 //                  { t: 'viewers', count } 现在有几人在看（含对方自己），和分享者那边显示的人数一致
 //                  { t: 'end' } 分享结束
-//   观看者 → 分享者 { t: 'have', parts: ['照片id:preview', '照片id:full', …] } 已经能显示的照片，新连接不必重发
+//   观看者 → 分享者 { t: 'have', parts: ['照片id:preview', '照片id:full', …], need } 已经能显示的照片，新连接不必重发；
+//                  need 是这块屏幕全屏看照片时，照片长边最多要多少像素
 //   双向           { t: 'here', on } 自己的页面在不在前台。切到别的 App、锁屏、关掉页面时马上告诉对方，
 //                  对方状态栏显示“暂时离开”，不用等连接超时（要几十秒）
 //
 // 照片通道 photos：
-//   { t: 'photo', n, id, kind, size, type, iv } 开始第 n 次传输：照片 id 的预览（preview）或原画质（full），
-//       共 size 字节；带 iv 时数据用这张照片的钥匙加密过
+//   { t: 'photo', n, id, kind, size, type, iv } 开始第 n 次传输：照片 id 的预览（preview）、原画质（full）
+//       或给大屏幕的大一档原画质（large），共 size 字节；带 iv 时数据用这张照片的钥匙加密过
 //   二进制分片：前 4 字节是 n，后面是数据。几次传输的分片可以交错，同一次传输的分片按顺序
 //   { t: 'drop', n } 第 n 次传输不发了（分享者翻远了），观看者丢掉已收到的部分
 //
-// 分享者按 plan.js 的先后发：当前这张的预览、原画质，再提前发前后几张。提前发的照片锁着（seal.js），
-// 观看者收到 show 里的钥匙才能打开，所以分享者翻到哪张，对方才能看到哪张。
+// 分享者按 plan.js 的先后发：当前这张的预览、原画质，再提前发前后几张；大屏幕直连时，当前这张再补发
+// 大一档的。提前发的照片锁着（seal.js），观看者收到 show 里的钥匙才能打开，所以分享者翻到哪张，
+// 对方才能看到哪张。
 
-import { sendOrder } from './plan.js';
+import { sendPlan } from './plan.js';
 import { canSeal } from './seal.js';
 
 const CHUNK = 16 * 1024; // 每条消息的大小上限，各浏览器都能稳定收发（Safari 的上限比 Chrome 小）
@@ -99,6 +101,7 @@ export class HostLink {
     this.relayed = false;
     this.wasOpen = false; // 连上过。之后断开时，分享者那边显示“朋友暂时离开”
     this.here = true; // 观看者的页面在前台
+    this.need = 0; // 观看者的屏幕全屏看照片时，照片长边要多少像素
     this.viewers = null;
     this.focused = null; // { photos, index }：分享者翻到哪张
     this.showed = '';
@@ -204,6 +207,9 @@ export class HostLink {
     if (relayed === this.relayed) return;
     this.relayed = relayed;
     this.onChange(this);
+    // 直连时才给大屏幕发大一档的（plan.js），所以换路以后重新排
+    this.replan();
+    this.pump();
   }
 
   onControl(text) {
@@ -215,6 +221,7 @@ export class HostLink {
     }
     if (msg.t === 'have' && Array.isArray(msg.parts)) {
       for (const part of msg.parts) if (typeof part === 'string') this.done.add(part);
+      this.need = Number(msg.need) || 0;
       this.sync();
     } else if (msg.t === 'here') {
       this.here = msg.on !== false;
@@ -249,18 +256,11 @@ export class HostLink {
     this.route();
   }
 
-  // 还要发的 [照片, 版本]，按先后排好。已经有原画质的照片不再发预览
+  // 还要发的 [照片, 版本]，按先后排好（plan.js）
   plan() {
     if (!this.focused) return [];
     const { photos, index } = this.focused;
-    const list = [];
-    for (const i of sendOrder(index, photos.length, canSeal)) {
-      const photo = photos[i];
-      if (this.done.has(`${photo.id}:full`)) continue;
-      if (!this.done.has(`${photo.id}:preview`)) list.push([photo, 'preview']);
-      list.push([photo, 'full']);
-    }
-    return list;
+    return sendPlan({ photos, index, done: this.done, need: this.need, direct: !this.relayed, ahead: canSeal });
   }
 
   // 分享者翻远了：不再需要的传输停下，告诉对方丢掉收到一半的
@@ -373,7 +373,7 @@ export class ViewerLink {
   constructor({ iceServers, signal, have, onState, onRoute, onPart, onShow, onViewers, onProgress, onHere, onEnd }) {
     this.iceServers = iceServers;
     this.signal = signal;
-    this.have = have; // () => 已经能显示的 '照片id:版本'，新连接上告诉分享者
+    this.have = have; // () => { parts: 已经能显示的 '照片id:版本', need: 屏幕要的像素 }，新连接上告诉分享者
     this.on = { onState, onRoute, onPart, onShow, onViewers, onProgress, onHere, onEnd };
     this.pc = null;
     this.control = null;
@@ -443,7 +443,7 @@ export class ViewerLink {
       done = true;
       // 先说明手里已有哪些照片，分享者就不必重发
       try {
-        channel.send(JSON.stringify({ t: 'have', parts: this.have() }));
+        channel.send(JSON.stringify({ t: 'have', ...this.have() }));
       } catch {
         // 已断开
       }
@@ -482,7 +482,7 @@ export class ViewerLink {
           return;
         }
         if (msg.t === 'photo') {
-          const valid = msg.size > 0 && msg.size <= MAX_PHOTO_BYTES && (msg.kind === 'preview' || msg.kind === 'full');
+          const valid = msg.size > 0 && msg.size <= MAX_PHOTO_BYTES && ['preview', 'full', 'large'].includes(msg.kind);
           if (valid) incoming.set(msg.n, { ...msg, chunks: [], received: 0 });
         } else if (msg.t === 'drop') {
           incoming.delete(msg.n); // 不认识的编号（已经收完的）什么也不做

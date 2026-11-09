@@ -2,7 +2,7 @@ import { $, api, sleep, toast, showView, showNotice, keepScreenOn, copyText, STA
 import { t, langQuery } from './i18n.js';
 import { subscribe } from './live.js';
 import { createStage, bindSwipe } from './stage.js';
-import { prepareImage, previewOf } from './images.js';
+import { prepareImage, previewOf, largeOf } from './images.js';
 import { HostLink, randomId } from './rtc.js';
 import { canSeal, newSecret, seal, toBase64 } from './seal.js';
 import * as keep from './keep.js';
@@ -365,7 +365,7 @@ function addFiles(files) {
       try {
         const parts = await prepareImage(file);
         if (dropped()) return;
-        markReady(item, parts);
+        markReady(item, { ...parts, file });
       } catch {
         if (!dropped()) dropItem(item);
       }
@@ -390,12 +390,15 @@ function addItem() {
   return item;
 }
 
-// parts：{ full, preview, thumb }，恢复的照片还带着原来的 id（旧版本存的没有 id 和 preview）
-function markReady(item, { id, full, preview, thumb }, { restored = false } = {}) {
+// parts：{ full, preview, thumb }，加上刚选的照片的原图 file、原画质的长边 fullEdge、值不值得做大一档（large）。
+// 恢复的照片还带着原来的 id（旧版本存的没有 id 和 preview），没有原图，也就没有大一档的
+function markReady(item, { id, full, preview, thumb, file, fullEdge, large }, { restored = false } = {}) {
   item.index = S.photos.push(item) - 1;
   // 每张照片一把钥匙：提前发给观看者的数据用它锁上，分享者翻到这张时才把钥匙发过去。
   // 钥匙只在这个页面的内存里，不暂存；重新打开分享页时换新钥匙
   const secret = canSeal ? newSecret() : null;
+  // 发给观看者的数据：preview 是先发的小图，full 是原画质，large 是给大屏幕的大一档
+  const source = (kind) => (kind === 'large' ? largeOf(file) : kind === 'full' ? full : (preview ?? previewOf(full)));
   Object.assign(item, {
     ready: true,
     id: id ?? randomId(6),
@@ -403,8 +406,9 @@ function markReady(item, { id, full, preview, thumb }, { restored = false } = {}
     url: URL.createObjectURL(full),
     thumbUrl: URL.createObjectURL(thumb),
     secret: secret && toBase64(secret),
-    // 发给观看者的数据：preview 是先发的小图，full 是原画质
-    payload: (kind) => payloadOf(`${item.id}:${kind}`, () => encodePart(kind === 'full' ? full : (preview ?? previewOf(full)), secret)),
+    fullEdge: fullEdge ?? 2048,
+    large: Boolean(file && large),
+    payload: (kind) => payloadOf(`${item.id}:${kind}`, () => encodePart(source(kind), secret)),
   });
   item.img.src = item.thumbUrl;
   item.el.classList.remove('is-pending');

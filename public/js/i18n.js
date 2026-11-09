@@ -40,8 +40,6 @@ const zh = {
   faq4a: '照片只在朋友打开的页面里显示，不能长按保存。分享结束后，朋友设备上的照片立即清除。截图和拍屏防不住。',
   faq5q: '为什么连不上，或者照片出来得慢？',
   faq5a: '两台设备能直连时最快。开着 VPN，或者在校园网、手机网络里时，常常要经服务器中转。中转时先显示一张小图，清楚的随后换上。暂时关掉 VPN 通常会快一些。',
-  faq6q: '朋友会提前收到我还没翻到的照片吗？',
-  faq6a: '会提前收到后面两三张，但打不开。为了翻页不用等，后面几张会先加密发过去。你翻到哪张，朋友才能打开哪张。没翻到的照片，分享结束时一起清除。',
 
   connecting: '正在连接…',
   watching: (n) => `${n} 人在看`,
@@ -155,8 +153,6 @@ const en = {
   faq4a: 'Photos only show inside the page your friends opened, and they can’t be saved by pressing and holding. When the share ends, the photos are cleared from their devices right away. Screenshots and photos of the screen can’t be prevented.',
   faq5q: 'Why can’t we connect, or why are photos slow?',
   faq5a: 'A direct connection between the two devices is fastest. On a VPN, a campus network or mobile data, the devices often connect through a relay instead. Through a relay, a small preview shows first and the sharp photo replaces it a moment later. Turning off your VPN for a while usually helps.',
-  faq6q: 'Do my friends get photos I haven’t flipped to yet?',
-  faq6a: 'They get the next two or three early, but they can’t open them. So that flipping feels instant, the next few photos are sent ahead, encrypted. Your friends can open a photo only once you flip to it. Photos you never flip to are cleared when the share ends.',
 
   connecting: 'Connecting…',
   watching: (n) => `${n} watching`,

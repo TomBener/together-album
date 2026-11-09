@@ -1,54 +1,54 @@
-# 一起翻相册
+# Together Album
 
-面对面分享照片的网页：分享者选好照片，朋友扫码，在自己的屏幕上跟着翻看，不用把手机递过去。不在一起时，发个链接也行。
+A web page for sharing photos face to face. The host picks some photos, a friend scans a QR code, and both flip through the photos together, each on their own screen. Nobody has to pass a phone around. When you're not together, send the link instead.
 
-照片从分享者的浏览器加密直传到朋友的浏览器，不上传服务器。两台设备连不通时，经 Cloudflare 中转，中转只转发加密后的数据。
+Photos go encrypted from the host's browser straight to the friend's browser. They are never uploaded to a server. When the two devices can't connect directly, the data goes through a Cloudflare relay, which only passes along encrypted data.
 
-## 工作原理
+## How it works
 
 ```
-分享者浏览器 ══ WebRTC（加密，点对点；连不通时经 TURN 中转）══▶ 朋友的浏览器
-      └────────── 信令服务器：只帮两边建立连接，不经手照片 ──────────┘
+Host's browser ══ WebRTC (encrypted, peer to peer; via a TURN relay if needed) ══▶ Friend's browser
+      └──────── Signaling server: only helps the two connect, never sees photos ────────┘
 ```
 
-- 照片在分享者的浏览器里缩到长边 2048 px，去掉位置信息，另做一张 960 px 的预览。翻页时先发预览，原画质随后换上。朋友用 Mac、iPad 这类大屏幕看、两边又是直连时，正在看的那张再换成 3072 px 的。
-- 后面几张会提前发过去，但每张都用自己的钥匙锁着。分享者翻到哪张，才把那张的钥匙发给朋友。
-- 点“结束”，朋友屏幕上的照片立即清除，链接失效。分享者关掉页面后，1 小时内回来可以接着分享。
-- 信令服务器有两个版本：线上用 Cloudflare Workers（`worker/index.js`），本地用 Node.js（`server/app.js`）。
+- The host's browser shrinks each photo to 2048 px on the long edge, removes its location data, and makes a 960 px preview. On each flip the preview goes first and the full photo replaces it. When the friend watches on a big screen (Mac, iPad) over a direct connection, the photo on screen is then replaced with a 3072 px version.
+- The next few photos are sent ahead, each locked with its own key. The friend gets a photo's key only when the host flips to it.
+- Tapping End clears the photos from the friend's screen at once, and the link stops working. If the host closes the page, they can come back within an hour and carry on.
+- The signaling server comes in two versions: Cloudflare Workers in production (`worker/index.js`) and Node.js for local use (`server/app.js`).
 
-## 谁能看到什么
+## Who can see what
 
-| 谁 | 能看到 |
+| Who | Can see |
 | --- | --- |
-| 信令服务器 | 双方的 IP 地址，看不到照片 |
-| STUN 服务器（Cloudflare、小米） | 你的公网 IP |
-| TURN 中转（Cloudflare，直连不通时才用） | 双方的 IP 和数据量，看不到照片 |
-| 照片 | 只在分享者和朋友的浏览器里 |
+| Signaling server | Both IP addresses, not the photos |
+| STUN servers (Cloudflare, Xiaomi) | Your public IP address |
+| TURN relay (Cloudflare, only when a direct connection fails) | Both IP addresses and how much data passes, not the photos |
+| Photos | Only the host's and the friend's browsers |
 
-## 本地运行
+## Run locally
 
-需要 Node.js 20 以上。
+Requires Node.js 20 or later.
 
 ```bash
 npm install
-npm start        # 局域网模式，终端里会打印地址和二维码
-npm run tunnel   # 另加一个临时的公网 HTTPS 地址（需要 cloudflared）
+npm start        # LAN mode; prints the address and a QR code in the terminal
+npm run tunnel   # also opens a temporary public HTTPS address (needs cloudflared)
 ```
 
-可以用环境变量 `PORT`、`HOST`、`PUBLIC_URL`、`ICE_SERVERS` 配置。
+Configure with the environment variables `PORT`, `HOST`, `PUBLIC_URL` and `ICE_SERVERS`.
 
-## 部署到 Cloudflare
+## Deploy to Cloudflare
 
 ```bash
-echo 'ALBUM_DOMAIN=album.example.com' > .env   # 自定义域名；不写就只用 workers.dev 地址
+echo 'ALBUM_DOMAIN=album.example.com' > .env   # custom domain; without it, only the workers.dev address is used
 cf auth login
 npm run deploy
 ```
 
-中转用 Cloudflare 的 TURN 服务。新建一个密钥，存进钥匙串，再设成 Worker 的 secret。只需设一次：
+The relay uses Cloudflare's TURN service. Create a key, store it in the Keychain, then set it as Worker secrets. This is needed only once:
 
 ```bash
-cf realtime turn keys create --name together-album    # 记下输出里的 uid 和 secret
+cf realtime turn keys create --name together-album    # note the uid and secret in the output
 security add-generic-password -a together-album -s together-album.TURN_KEY_ID -w '<uid>'
 security add-generic-password -a together-album -s together-album.TURN_KEY_API_TOKEN -w '<secret>'
 for name in TURN_KEY_ID TURN_KEY_API_TOKEN; do
@@ -57,17 +57,17 @@ for name in TURN_KEY_ID TURN_KEY_API_TOKEN; do
 done
 ```
 
-不要用 `cf deploy --secrets-file` 传这两项：它会把变量名原样当成密钥上传。
+Don't pass these two with `cf deploy --secrets-file`: it uploads the variable names themselves as the secret values.
 
-## 测试
+## Test
 
 ```bash
-npm test                                          # 本地 Node 版
-TEST_BASE_URL=https://album.example.com npm test  # 线上
+npm test                                          # local Node.js version
+TEST_BASE_URL=https://album.example.com npm test  # production
 ```
 
-排查连接时，在网址后加 `?debug=1`，状态栏会标出是否经中转；加 `?relay=1`，这一页只走中转。
+To debug a connection, add `?debug=1` to the address: the status bar then shows whether the relay is in use. With `?relay=1`, that page connects only through the relay.
 
-## 开源
+## Open source
 
-AGPL-3.0，见 `LICENSE`。线上网页运行的脚本和样式，就是 `public/` 下的这些文件。照片的压缩在 `public/js/images.js`，加密在 `public/js/seal.js`，传输在 `public/js/rtc.js`。
+AGPL-3.0; see `LICENSE`. The scripts and styles the live site runs are exactly the files in `public/`. Photos are compressed in `public/js/images.js`, encrypted in `public/js/seal.js` and sent in `public/js/rtc.js`.

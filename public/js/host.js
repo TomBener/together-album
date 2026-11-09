@@ -598,8 +598,9 @@ function bindControls() {
   $('#share-text').textContent = t(isApple ? 'airdrop' : 'sendLink');
   $('#btn-share').addEventListener('click', async () => {
     try {
-      // 只传链接：带上文字的话，隔空投送会把它当成一段备忘而不是直接打开网页
-      await navigator.share({ url: $('#join-link').value });
+      // 不传文字（text）：带上文字的话，隔空投送会把它当成一段备忘而不是直接打开网页。
+      // 标题只显示在分享面板顶部的预览里，不会和链接一起发出去
+      await navigator.share({ title: t('appName'), url: $('#join-link').value });
     } catch (err) {
       if (err.name !== 'AbortError') toast(t('shareFailed'));
     }

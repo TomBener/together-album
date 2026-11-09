@@ -561,16 +561,9 @@ function renderInvite() {
         return button;
       }),
     );
-    // 在微信里分享的人发链接时要离开这个页面，提示他回来接着翻
-    $('#invite-hint').textContent = t(
-      join?.kind === 'public'
-        ? inWeChat
-          ? 'hintWeChat'
-          : 'hintPublic'
-        : join?.kind === 'tailscale'
-          ? 'hintTailscale'
-          : 'hintLan',
-    );
+    // 在微信里分享的人发链接时要离开这个页面，提示他回来接着翻。其他公网情况不提示，空的提示不占位（.hint:empty）
+    const hint = join?.kind === 'public' ? (inWeChat ? 'hintWeChat' : null) : join?.kind === 'tailscale' ? 'hintTailscale' : 'hintLan';
+    $('#invite-hint').textContent = hint ? t(hint) : '';
   }
 
   const total = S.items.length;

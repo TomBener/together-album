@@ -1,10 +1,11 @@
 import { $, api, toast, showView, showNotice, keepScreenOn, STALL_MS } from './util.js';
-import { t } from './i18n.js';
+import { t, langQuery } from './i18n.js';
 import { subscribe } from './live.js';
 import { createStage, bindSwipe } from './stage.js';
 import { ViewerLink, randomId } from './rtc.js';
 
-const RETRY_MS = 12_000; // 这么久还没连上，就请分享者重新发起连接
+const RETRY_MS = 15_000; // 这么久还没连上，就请分享者重新发起连接
+const AWAY_DELAY_MS = 4000; // 分享者的信令断开这么久还没回来，才算“暂时离开”；常见的短暂断线不必惊动观看者
 const isTouch = matchMedia('(hover: none)').matches;
 
 export function startViewer(sessionId) {
@@ -28,6 +29,9 @@ export function startViewer(sessionId) {
     total: 0,
     viewers: 0, // 几人在看，由分享者告知
     peak: 0, // 这次分享里最多同时几人在看
+    hostOnline: true, // 分享者的页面开着（服务器告知）
+    away: false, // 分享者离开了一阵：遮住照片，等对方回来
+    relayed: false, // 经中转连上
     following: true, // 跟着分享者翻；自己翻到别处后为 false，直到回到分享者那一张
     hinted: false,
     stalled: false, // 连了一阵还没连上，改为显示怎么解决
@@ -35,6 +39,7 @@ export function startViewer(sessionId) {
   };
   let retryTimer = null;
   let stallTimer = null;
+  let awayTimer = null;
   let idleTimer = null;
 
   const signal = (data) =>
@@ -43,21 +48,25 @@ export function startViewer(sessionId) {
   const live = subscribe(`/api/sessions/${sessionId}/live?peer=${peerId}`, `/api/sessions/${sessionId}`, {
     onMessage(msg) {
       if (msg.type === 'welcome') {
+        const first = !V.link;
         V.link ??= new ViewerLink({
           iceServers: msg.ice,
           signal,
           onState,
+          onRoute,
           onPhoto,
           onShow,
           onViewers,
           onProgress,
           onEnd: () => end('ended'),
         });
-        if (V.p2p !== 'open') retryLater(RETRY_MS);
-        stallTimer ??= setTimeout(() => {
-          V.stalled = true;
-          render();
-        }, STALL_MS);
+        V.link.iceServers = msg.ice; // 服务器可能后来才领到中转凭证
+        // 刚打开链接时分享者就不在：直接说明，不必等。之后信令重连时照常等几秒，免得短暂断线就遮住照片
+        hostPresence(msg.hostOnline !== false, { now: first });
+      } else if (msg.type === 'host') {
+        hostPresence(msg.online);
+      } else if (msg.type === 'ice') {
+        if (V.link) V.link.iceServers = msg.ice;
       } else if (msg.type === 'signal') {
         V.link?.receive(msg.data);
       } else if (msg.type === 'ended') {
@@ -72,11 +81,49 @@ export function startViewer(sessionId) {
     onGone: () => end(V.index >= 0 ? 'ended' : 'gone'),
   });
 
+  // 分享者的页面开着还是关着。关着时不催对方重连，也不提示换网络：问题不在网络
+  function hostPresence(online, { now = false } = {}) {
+    V.hostOnline = online;
+    clearTimeout(awayTimer);
+    if (online) {
+      V.away = false;
+      armStall();
+      if (V.p2p !== 'open') retryLater(RETRY_MS);
+    } else if (now) {
+      V.away = true;
+      disarmStall();
+    } else {
+      disarmStall();
+      awayTimer = setTimeout(() => {
+        V.away = true;
+        render();
+      }, AWAY_DELAY_MS);
+    }
+    render();
+  }
+
+  // 连了一阵还没连上，就告诉观看者怎么解决
+  function armStall() {
+    if (V.p2p === 'open' || stallTimer) return;
+    stallTimer = setTimeout(() => {
+      stallTimer = null;
+      V.stalled = true;
+      render();
+    }, STALL_MS);
+  }
+
+  function disarmStall() {
+    clearTimeout(stallTimer);
+    stallTimer = null;
+    V.stalled = false;
+  }
+
+  // 请分享者重新发起连接。带上这边正在用的连接，分享者已经换了新连接时不再打断它
   function retryLater(ms) {
     clearTimeout(retryTimer);
     retryTimer = setTimeout(() => {
       if (V.ended || V.p2p === 'open') return;
-      signal({ reconnect: true }).catch(() => {});
+      if (V.hostOnline) signal({ reconnect: true, link: V.link?.linkId ?? null }).catch(() => {});
       retryLater(RETRY_MS);
     }, ms);
   }
@@ -85,14 +132,21 @@ export function startViewer(sessionId) {
     V.p2p = state;
     if (state === 'open') {
       clearTimeout(retryTimer);
+      disarmStall();
       V.failures = 0;
     } else if (state === 'failed' || state === 'closed') {
       V.failures++;
       V.progress = null;
+      V.relayed = false;
       retryLater(2000);
     } else if (state === 'disconnected') {
       retryLater(RETRY_MS); // 往往能自己恢复，先等一等
     }
+    render();
+  }
+
+  function onRoute(relayed) {
+    V.relayed = relayed;
     render();
   }
 
@@ -154,7 +208,7 @@ export function startViewer(sessionId) {
   }
 
   function go(step) {
-    if (V.ended || V.index < 0) return;
+    if (V.ended || V.index < 0 || paused()) return;
     const index = neighbor(step);
     if (index === null) blocked(step);
     else display(index);
@@ -180,25 +234,38 @@ export function startViewer(sessionId) {
     V.ended = true;
     clearTimeout(retryTimer);
     clearTimeout(stallTimer);
+    clearTimeout(awayTimer);
     live.close();
     V.link?.reset();
     stage.clear();
     for (const url of photos.values()) URL.revokeObjectURL(url);
     photos.clear();
     seen.clear();
+    const home = { label: t('backHome'), href: `/${langQuery}` };
     showNotice(
       kind === 'gone'
-        ? { title: t('linkGone'), text: t('linkGoneText') }
-        : { title: t('shareEnded'), text: t('clearedHere') },
+        ? { title: t('linkGone'), text: t('linkGoneText'), action: home }
+        : { title: t('shareEnded'), text: t('clearedHere'), action: home },
     );
+  }
+
+  // 分享者离开了一阵、直连也断了：遮住照片，回来后再显示
+  function paused() {
+    return V.away && V.p2p !== 'open';
   }
 
   function render() {
     if (V.ended) return;
+    const away = paused();
+    stageEl.classList.toggle('is-paused', away);
     const receiving = V.progress === null ? null : `${Math.round(V.progress * 100)}%`;
     let state = 'wait';
     let text = t('connecting');
-    if (V.p2p === 'open') [state, text] = ['live', receiving ? t('receiving', receiving) : V.viewers ? t('watching', V.viewers) : t('live')];
+    if (V.p2p === 'open') {
+      state = 'live';
+      text = receiving ? t('receiving', receiving) : V.viewers ? t('watching', V.viewers) : t('live');
+      if (V.relayed && !receiving) text += ` · ${t('relayed')}`;
+    } else if (away) [state, text] = ['warn', t('hostAway')];
     else if (V.p2p === 'disconnected') [state, text] = ['warn', t('unstable')];
     else if (V.failures) [state, text] = ['warn', t('retrying')];
     else if (!V.link || V.signaling !== 'live') text = t('connecting');
@@ -206,17 +273,19 @@ export function startViewer(sessionId) {
     $('#status .chip-text').textContent = text;
 
     $('#counter').textContent = V.index >= 0 ? `${V.index + 1} / ${V.total}` : '';
-    $('#btn-resync').hidden = V.following || V.host < 0;
+    $('#btn-resync').hidden = away || V.following || V.host < 0;
     $('#resync-text').textContent = t('backToLive', V.host + 1);
-    $('#btn-prev').disabled = neighbor(-1) === null;
-    $('#btn-next').disabled = neighbor(1) === null;
+    $('#btn-prev').disabled = away || neighbor(-1) === null;
+    $('#btn-next').disabled = away || neighbor(1) === null;
     $('#recv').classList.toggle('is-active', V.progress !== null);
     $('#recv').style.setProperty('--progress', V.progress ?? 0);
 
     let wait = null;
-    if (V.index < 0) {
+    if (away) {
+      wait = t('hostAwayText');
+    } else if (V.index < 0) {
       if (V.p2p === 'open') wait = receiving ? t('receivingPhoto', receiving) : t('waitingFirst');
-      else if (V.failures || V.stalled) wait = t('connectHint');
+      else if (V.hostOnline && (V.failures || V.stalled)) wait = t('connectHint');
       else if (V.link) wait = t('connectingPeer');
       else wait = t('connecting');
     }
@@ -246,18 +315,18 @@ export function startViewer(sessionId) {
     step: go,
     blocked,
     tap: () => (stageEl.classList.contains('is-idle') ? wake() : rest()),
-    enabled: () => !zoomed() && V.index >= 0,
+    enabled: () => !zoomed() && V.index >= 0 && !paused(),
   });
   $('#btn-prev').addEventListener('click', () => go(-1));
   $('#btn-next').addEventListener('click', () => go(1));
-  $('#btn-resync').addEventListener('click', () => display(V.host));
+  $('#btn-resync').addEventListener('click', () => !paused() && display(V.host));
   document.addEventListener('keydown', (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     const step = { ArrowRight: 1, ArrowDown: 1, PageDown: 1, ArrowLeft: -1, ArrowUp: -1, PageUp: -1 }[e.key];
     if (step) {
       e.preventDefault();
       go(step);
-    } else if ((e.key === 'Enter' || e.key === 'Escape') && !V.following && V.host >= 0 && e.target === document.body) {
+    } else if ((e.key === 'Enter' || e.key === 'Escape') && !V.following && V.host >= 0 && !paused() && e.target === document.body) {
       display(V.host);
     }
   });

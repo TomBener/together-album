@@ -246,6 +246,62 @@ h1 {
   font-weight: 600;
 }
 
+/* ---------- 常见问题 ---------- */
+
+.faq {
+  margin-top: 28px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+  text-align: left;
+}
+
+.faq h2 {
+  font-size: 17px;
+  margin: 0 0 4px;
+}
+
+.faq details + details {
+  border-top: 1px solid var(--line);
+}
+
+.faq summary {
+  position: relative;
+  padding: 12px 28px 12px 0;
+  list-style: none;
+  cursor: pointer;
+  font-size: 15px;
+  color: var(--ink);
+}
+
+.faq summary::-webkit-details-marker {
+  display: none;
+}
+
+/* 右侧的小箭头，展开时朝上 */
+.faq summary::after {
+  content: "";
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid var(--ink-3);
+  border-bottom: 1.5px solid var(--ink-3);
+  transform: translateY(-70%) rotate(45deg);
+  transition: transform 0.2s var(--ease);
+}
+
+.faq details[open] summary::after {
+  transform: translateY(-20%) rotate(225deg);
+}
+
+.faq details p {
+  margin: 0 0 14px;
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--ink-2);
+}
+
 /* 一叠洗出来的照片，呼应“纸质相册” */
 .prints {
   position: relative;
@@ -479,6 +535,13 @@ h1 {
 .placeholder p {
   margin: 0;
   max-width: 20em;
+}
+
+/* 分享者暂时离开：观看端遮住照片，只留提示，对方回来后再显示 */
+.stage.is-paused .photo,
+.stage.is-paused .ambient,
+.stage.is-paused .counter {
+  visibility: hidden;
 }
 
 .spinner {

@@ -2,8 +2,8 @@ export const $ = (selector) => document.querySelector(selector);
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// 连了这么久还没连上，就给两端看怎么解决（i18n 的 connectHint）。开着 VPN 或网络不允许设备互连时直连会失败
-export const STALL_MS = 8000;
+// 连了这么久还没连上，就给两端看怎么解决（i18n 的 connectHint）。正常情况下直连或中转几秒内就能连上
+export const STALL_MS = 10_000;
 
 export function showView(id) {
   for (const view of document.querySelectorAll('.view')) view.hidden = view.id !== id;
@@ -31,8 +31,11 @@ export function showNotice({ title, text, action = null }) {
   showView('notice');
 }
 
-/** fetch 的薄封装：带上分享者密钥、解析 JSON，非 2xx 时抛出带 status 的错误。 */
-export async function api(path, { method = 'GET', key, json, body, type } = {}) {
+/**
+ * fetch 的薄封装：带上分享者密钥、解析 JSON，非 2xx 时抛出带 status 的错误。
+ * keepalive 让请求在页面关掉后也能发完。
+ */
+export async function api(path, { method = 'GET', key, json, body, type, keepalive = false } = {}) {
   const headers = {};
   if (key) headers.Authorization = `Bearer ${key}`;
   if (json !== undefined) {
@@ -41,7 +44,7 @@ export async function api(path, { method = 'GET', key, json, body, type } = {}) 
   } else if (type) {
     headers['Content-Type'] = type;
   }
-  const res = await fetch(path, { method, headers, body, cache: 'no-store' });
+  const res = await fetch(path, { method, headers, body, cache: 'no-store', keepalive });
   const data = res.headers.get('content-type')?.includes('json') ? await res.json() : null;
   if (!res.ok) throw Object.assign(new Error(data?.error ?? `HTTP ${res.status}`), { status: res.status });
   return data;

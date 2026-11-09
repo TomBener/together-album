@@ -1,6 +1,9 @@
 const MAX_EDGE = 2048; // 手机、平板、笔记本全屏都够清晰，单张约 0.3–1.2 MB（细节多的照片更大）
 const QUALITY = 0.85;
 const THUMB_EDGE = 200;
+// 经中转发送时用的尺寸：手机全屏看仍然清楚，体积约为原图的三分之一到一半
+const RELAY_EDGE = 1280;
+const RELAY_QUALITY = 0.82;
 
 /**
  * 在浏览器里把照片缩小并重新编码为 JPEG。
@@ -16,6 +19,19 @@ export async function prepareImage(file) {
     const full = await encode(img, MAX_EDGE, QUALITY);
     const thumb = await encode(img, THUMB_EDGE, 0.7);
     return { full, thumb };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/** 把处理好的照片再缩小一档，经中转发送时用，每张少等几秒。 */
+export async function shrink(blob) {
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    return await encode(img, RELAY_EDGE, RELAY_QUALITY);
   } finally {
     URL.revokeObjectURL(url);
   }

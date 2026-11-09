@@ -1,4 +1,5 @@
 // WebRTC 点对点传输。照片走加密的 DataChannel（DTLS），服务器只转发建立连接用的信令。
+// 能直连时直连；直连不通时经 TURN 中继转发，中继只见到加密后的数据，这时改发小一些的照片。
 //
 // 通道上的消息（按顺序、可靠送达）：
 //   { t: 'photo', id, size, type } 后面紧跟若干个二进制分片，合计 size 字节
@@ -10,6 +11,12 @@ const CHUNK = 16 * 1024; // 各浏览器都能稳定收发的分片大小（Safa
 const HIGH_WATER = 1024 * 1024;
 const LOW_WATER = 256 * 1024;
 const MAX_PHOTO_BYTES = 30 * 1024 * 1024;
+const NEGOTIATE_MS = 15_000; // 一次连接尝试这么久还没连上，就算失败，有机会就重来
+const SIGNAL_RETRY_MS = 30_000; // 信令发不出去时（对方或自己的实时通道正好断了）最多重发这么久
+// 网址带 ?relay=1 时只走中继，用来测试中转的速度
+const FORCE_RELAY = new URLSearchParams(location.search).has('relay');
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function randomId(bytes = 16) {
   // crypto.randomUUID 只在 HTTPS 下可用，局域网 http 也要能跑
@@ -22,12 +29,54 @@ function linkState(pc) {
   return state === 'checking' || state === 'new' ? 'connecting' : state;
 }
 
+function peerConnection(iceServers) {
+  return new RTCPeerConnection({ iceServers, iceTransportPolicy: FORCE_RELAY ? 'relay' : 'all' });
+}
+
+/**
+ * 发一条信令。对方或自己的实时通道正好断开时服务器会退回（403/404），网络出错时 fetch 会抛错，
+ * 这些情况下稍后重发，直到发出去、这条连接作废（alive() 为假）或超时。
+ */
+async function deliver(signal, data, alive) {
+  const deadline = Date.now() + SIGNAL_RETRY_MS;
+  for (let wait = 500; ; wait = Math.min(wait * 2, 4000)) {
+    try {
+      return await signal(data);
+    } catch (err) {
+      const retry = !err.status || err.status === 403 || err.status === 404 || err.status === 429 || err.status >= 500;
+      if (!retry || Date.now() + wait > deadline) throw err;
+      await sleep(wait);
+      if (!alive()) throw err;
+    }
+  }
+}
+
+/** 这条连接现在是不是经 TURN 中继。各浏览器标出“正在用的那一对地址”的方式不同，依次尝试。 */
+async function isRelayed(pc) {
+  try {
+    const stats = await pc.getStats();
+    const all = [...stats.values()];
+    const id = all.find((s) => s.type === 'transport' && s.selectedCandidatePairId)?.selectedCandidatePairId;
+    const pair =
+      (id && stats.get(id)) ??
+      all.find((s) => s.type === 'candidate-pair' && s.selected) ??
+      all.find((s) => s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded');
+    if (!pair) return false;
+    return [pair.localCandidateId, pair.remoteCandidateId].some((c) => stats.get(c)?.candidateType === 'relay');
+  } catch {
+    return false;
+  }
+}
+
 /** 分享者这一端：每位观看者一条。只在对方需要展示时才发送那一张照片。 */
 export class HostLink {
   constructor(peerId, { iceServers, signal, onChange }) {
     this.peerId = peerId;
     this.id = randomId(8); // 区分同一观看者的新旧连接，过期的信令直接丢弃
     this.onChange = onChange;
+    this.started = Date.now();
+    this.closed = false;
+    this.relayed = false;
     this.sent = new Set();
     this.wanted = null;
     this.busy = false;
@@ -35,16 +84,18 @@ export class HostLink {
     this.outbox = Promise.resolve();
     this.inbox = Promise.resolve();
     this.send = (data) => {
-      // 信令逐条发送，保证对方按 offer → candidate 的顺序收到
-      this.outbox = this.outbox.then(() => signal({ ...data, link: this.id })).catch(() => {});
+      // 信令逐条发送，保证对方按 offer → candidate 的顺序收到；发不出去就等一等重发，后面的排队
+      const message = { ...data, link: this.id };
+      this.outbox = this.outbox.then(() => deliver(signal, message, () => !this.closed)).catch(() => {});
     };
 
-    const pc = (this.pc = new RTCPeerConnection({ iceServers }));
+    const pc = (this.pc = peerConnection(iceServers));
     // 必须先建通道再 createOffer，否则 SDP 里没有数据通道
     this.channel = pc.createDataChannel('album', { ordered: true });
     this.channel.binaryType = 'arraybuffer';
     this.channel.bufferedAmountLowThreshold = LOW_WATER;
-    this.channel.onopen = () => {
+    this.channel.onopen = async () => {
+      this.relayed = await isRelayed(pc);
       this.onChange(this);
       this.flush();
     };
@@ -69,6 +120,13 @@ export class HostLink {
 
   get state() {
     return this.open ? 'open' : linkState(this.pc);
+  }
+
+  /** 连接已经失败，或者尝试了太久还没连上：再有机会（对方重连信令等）时就重新建立。 */
+  get stale() {
+    if (this.open) return false;
+    const state = this.state;
+    return state === 'failed' || state === 'closed' || Date.now() - this.started > NEGOTIATE_MS;
   }
 
   receive(data) {
@@ -100,7 +158,9 @@ export class HostLink {
         const { photo, index, total } = this.wanted;
         this.wanted = null;
         if (!this.sent.has(photo.id)) {
-          await this.sendPhoto(photo);
+          // 每张发之前看一眼：刚连上时可能先走中继，过一会儿换成直连
+          this.relayed = await isRelayed(this.pc);
+          await this.sendPhoto(photo, this.relayed);
           this.sent.add(photo.id);
         }
         if (this.wanted) continue; // 传输途中又翻页了，直接跳到最新一张
@@ -113,9 +173,11 @@ export class HostLink {
     }
   }
 
-  async sendPhoto(photo) {
-    const bytes = await photo.blob.arrayBuffer();
-    this.channel.send(JSON.stringify({ t: 'photo', id: photo.id, size: bytes.byteLength, type: photo.blob.type }));
+  async sendPhoto(photo, small) {
+    const blob = small ? await photo.small() : photo.blob;
+    const bytes = await blob.arrayBuffer();
+    if (!this.open) throw new Error('closed');
+    this.channel.send(JSON.stringify({ t: 'photo', id: photo.id, size: bytes.byteLength, type: blob.type }));
     for (let offset = 0; offset < bytes.byteLength; offset += CHUNK) {
       if (this.channel.bufferedAmount > HIGH_WATER) await this.drained();
       this.channel.send(bytes.slice(offset, offset + CHUNK));
@@ -156,6 +218,7 @@ export class HostLink {
   }
 
   close() {
+    this.closed = true;
     this.wanted = null;
     this.channel.onclose = null;
     this.pc.close();
@@ -164,11 +227,12 @@ export class HostLink {
 
 /** 观看者这一端：接受分享者的连接，收照片和翻页指令。 */
 export class ViewerLink {
-  constructor({ iceServers, signal, onState, onPhoto, onShow, onViewers, onProgress, onEnd }) {
+  constructor({ iceServers, signal, onState, onRoute, onPhoto, onShow, onViewers, onProgress, onEnd }) {
     this.iceServers = iceServers;
     this.signal = signal;
-    this.on = { onState, onPhoto, onShow, onViewers, onProgress, onEnd };
+    this.on = { onState, onRoute, onPhoto, onShow, onViewers, onProgress, onEnd };
     this.pc = null;
+    this.channel = null;
     this.linkId = null;
     this.pending = [];
     this.inbox = Promise.resolve();
@@ -176,8 +240,11 @@ export class ViewerLink {
   }
 
   send(data) {
+    // 逐条发送，发不出去就等一等重发；分享者换了新连接，旧连接的信令就不再重发
     const link = this.linkId;
-    this.outbox = this.outbox.then(() => this.signal({ ...data, link })).catch(() => {});
+    this.outbox = this.outbox
+      .then(() => deliver(this.signal, { ...data, link }, () => this.linkId === link))
+      .catch(() => {});
   }
 
   receive(data) {
@@ -188,13 +255,17 @@ export class ViewerLink {
     if (data.sdp?.type === 'offer') {
       this.reset();
       this.linkId = data.link;
-      const pc = (this.pc = new RTCPeerConnection({ iceServers: this.iceServers }));
+      this.outbox = Promise.resolve(); // 新连接的信令不必排在旧连接的重发后面
+      const pc = (this.pc = peerConnection(this.iceServers));
       const current = () => pc === this.pc;
       pc.onicecandidate = (e) => e.candidate && current() && this.send({ candidate: e.candidate.toJSON() });
       pc.onconnectionstatechange = pc.oniceconnectionstatechange = () => {
-        if (current()) this.on.onState(linkState(pc));
+        if (!current()) return;
+        const state = linkState(pc);
+        // 短暂断开又恢复时，通道一直开着，不会再收到 open 事件，要在这里报回“已连上”
+        this.on.onState(state === 'connected' && this.channel?.readyState === 'open' ? 'open' : state);
       };
-      pc.ondatachannel = (e) => this.attach(e.channel, current);
+      pc.ondatachannel = (e) => this.attach(e.channel, pc, current);
       this.on.onState('connecting');
       await pc.setRemoteDescription(data.sdp);
       for (const c of this.pending.splice(0)) await pc.addIceCandidate(c).catch(() => {});
@@ -206,10 +277,16 @@ export class ViewerLink {
     }
   }
 
-  attach(channel, current) {
+  attach(channel, pc, current) {
+    if (!current()) return; // 旧连接晚到的通道不要
+    this.channel = channel;
     channel.binaryType = 'arraybuffer';
     let incoming = null;
-    const opened = () => current() && this.on.onState('open');
+    const opened = () => {
+      if (!current()) return;
+      this.on.onState('open');
+      isRelayed(pc).then((relayed) => current() && this.on.onRoute?.(relayed));
+    };
     channel.onopen = opened;
     if (channel.readyState === 'open') opened();
     channel.onclose = () => current() && this.on.onState('closed');
@@ -243,6 +320,7 @@ export class ViewerLink {
   reset() {
     this.pc?.close();
     this.pc = null;
+    this.channel = null;
     this.pending = [];
   }
 }

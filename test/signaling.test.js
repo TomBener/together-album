@@ -80,17 +80,22 @@ function listen(path, options) {
 test('完整流程：创建 → 加入 → 交换信令 → 结束', async () => {
   const created = await post('/api/sessions');
   assert.equal(created.status, 201);
-  const { id, hostKey, joinUrls, ice } = await created.json();
+  const { id, hostKey, keepKey, joinUrls, ice } = await created.json();
   assert.match(id, /^[\w-]{22}$/);
+  assert.match(keepKey, /^[\w-]{43}$/);
   assert.ok(joinUrls.length >= 1 && joinUrls.every((j) => j.url.endsWith(`/v/${id}`)));
   assert.ok(Array.isArray(ice));
 
   const host = await listen(`/api/sessions/${id}/live?key=${hostKey}`);
-  assert.deepEqual((await host.next('hello')).peers, []);
+  const hello = await host.next('hello');
+  assert.deepEqual(hello.peers, []);
+  assert.ok(Array.isArray(hello.ice));
 
   const peer = 'viewer-aaaaaaaaaaaaaaaa';
   const viewer = await listen(`/api/sessions/${id}/live?peer=${peer}`);
-  assert.equal((await viewer.next('welcome')).peerId, peer);
+  const welcome = await viewer.next('welcome');
+  assert.equal(welcome.peerId, peer);
+  assert.equal(welcome.hostOnline, true);
   assert.equal((await host.next('peer-join')).peerId, peer);
 
   // 分享者 → 观看者
@@ -132,6 +137,10 @@ test('权限：没有密钥不能冒充分享者，陌生观看者不能发信�
   assert.equal((await post(`/api/sessions/${id}/signal`, { peer: 'viewer-not-connected-xx', data: {} })).status, 403);
   assert.equal((await post(`/api/sessions/${id}/signal`, { to: peer, data: {} }, 'wrong-key')).status, 403);
   assert.equal((await fetch(`${base}/api/sessions/${id}`, { method: 'DELETE' })).status, 401);
+  // 暂存照片的钥匙只给分享者
+  assert.equal((await (await fetch(`${base}/api/sessions/${id}`)).json()).keepKey, undefined);
+  const auth = { headers: { Authorization: `Bearer ${hostKey}` } };
+  assert.match((await (await fetch(`${base}/api/sessions/${id}`, auth)).json()).keepKey, /^[\w-]{43}$/);
   assert.equal((await listen(`/api/sessions/${id}/live?peer=bad`)).status, 400);
   // 别的网站的页面不能连上来
   const foreign = await listen(`/api/sessions/${id}/live?peer=viewer-ffffffffffffffff`, {
@@ -158,6 +167,31 @@ test('同一观看者断线重连：替换旧连接，不重复计数', async ()
   // 旧连接关闭不应让分享者以为观看者离开了
   await assert.rejects(host.next('peer-leave', 300));
   second.close();
+});
+
+test('分享者离开又回来：观看者收到通知，分享者不在时信令退回', async () => {
+  const { id, hostKey } = await (await post('/api/sessions')).json();
+  const peer = 'viewer-gggggggggggggggg';
+  const viewer = await listen(`/api/sessions/${id}/live?peer=${peer}`);
+  assert.equal((await viewer.next('welcome')).hostOnline, false);
+  // 分享者不在线：退回，由观看者稍后重发
+  assert.equal((await post(`/api/sessions/${id}/signal`, { peer, data: { link: 'l1' } })).status, 404);
+
+  // 分享者（重新）打开页面：拿到名单和连接配置，观看者收到“回来了”
+  const host = await listen(`/api/sessions/${id}/live?key=${hostKey}`);
+  const hello = await host.next('hello');
+  assert.deepEqual(hello.peers, [peer]);
+  assert.ok(Array.isArray(hello.ice));
+  assert.match(hello.keepKey, /^[\w-]{43}$/);
+  assert.equal((await viewer.next('host')).online, true);
+  assert.equal((await post(`/api/sessions/${id}/signal`, { peer, data: { link: 'l1' } })).status, 202);
+  assert.equal((await host.next('signal')).from, peer);
+
+  // 分享页关掉：观看者收到“离开了”，会话仍在，链接仍然有效
+  host.close();
+  assert.equal((await viewer.next('host')).online, false);
+  assert.equal((await fetch(`${base}/api/sessions/${id}`)).status, 200);
+  viewer.close();
 });
 
 test('页面与二维码', async () => {

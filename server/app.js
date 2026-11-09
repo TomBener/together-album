@@ -20,8 +20,9 @@ export const DEFAULT_LIMITS = {
   maxAgeMs: 6 * 60 * 60 * 1000, // 无论如何 6 小时后结束
 };
 
-// STUN 只用来让设备知道自己的公网地址，不经手照片。设成 [] 则只走局域网直连。
-export const DEFAULT_ICE_SERVERS = [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] }];
+// STUN 只用来让设备知道自己的公网地址，不经手照片。Google 的 STUN 在国内连不上，换成国内能连上的小米。
+// 设成 [] 则只走局域网直连；要中继就在 ICE_SERVERS 里加 TURN 服务器。
+export const DEFAULT_ICE_SERVERS = [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.miwifi.com:3478'] }];
 
 const HEARTBEAT_MS = 20_000; // 低于 Cloudflare 的 100 秒空闲断流，也用来清理掉线的连接
 const SWEEP_MS = 60_000;
@@ -126,7 +127,7 @@ export function createApp({
     if (!s) throw new HttpError(404, 'not_found');
     const host = isHost(req, url, s);
 
-    if (!action && method === 'GET') return sendJSON(res, 200, { ok: true });
+    if (!action && method === 'GET') return sendJSON(res, 200, host ? { ok: true, keepKey: s.keepKey } : { ok: true });
     if (!action && method === 'DELETE') {
       if (!host) throw new HttpError(401, 'unauthorized');
       endSession(s, 'host');
@@ -146,6 +147,8 @@ export function createApp({
     const s = {
       id,
       hostKey: token(24),
+      // 分享者在本机加密暂存照片用的钥匙，只给分享者。会话结束或过期时随会话删除，暂存的照片就再也打不开
+      keepKey: token(32),
       joinUrls: joinUrlsFor(req, id),
       hosts: new Set(),
       peers: new Map(), // 观看者自己生成的 peerId → WebSocket 连接
@@ -155,7 +158,7 @@ export function createApp({
     };
     sessions.set(id, s);
     log(`[创建] ${short(id)}  当前 ${sessions.size} 个会话`);
-    sendJSON(res, 201, { id, hostKey: s.hostKey, joinUrls: s.joinUrls, ice: iceServers });
+    sendJSON(res, 201, { id, hostKey: s.hostKey, keepKey: s.keepKey, joinUrls: s.joinUrls, ice: iceServers });
   }
 
   function endSession(s, reason) {
@@ -230,10 +233,15 @@ export function createApp({
     if (host) {
       s.hosts.add(client);
       s.hostSeenAt = Date.now();
-      // 分享者（重新）连上时拿到完整名单，自行补连还没直连上的观看者
-      push(client, { type: 'hello', peers: [...s.peers.keys()], joinUrls: s.joinUrls });
+      // 分享者（重新）连上时拿到完整名单和连接配置，自行补连还没连上的观看者。
+      // 关掉的分享页重新打开时也走这里，所以连接配置要从这里给
+      push(client, { type: 'hello', peers: [...s.peers.keys()], joinUrls: s.joinUrls, ice: iceServers, keepKey: s.keepKey });
+      // 观看者据此区分“对方暂时离开了”和“网络连不上”
+      toPeers(s, { type: 'host', online: true });
       ws.on('close', () => {
-        if (s.hosts.delete(client)) s.hostSeenAt = Date.now();
+        if (!s.hosts.delete(client)) return;
+        s.hostSeenAt = Date.now();
+        if (!s.hosts.size) toPeers(s, { type: 'host', online: false });
       });
       return;
     }
@@ -242,7 +250,7 @@ export function createApp({
     const previous = s.peers.get(peerId);
     s.peers.set(peerId, client);
     previous?.ws.close(4001, 'replaced');
-    push(client, { type: 'welcome', peerId, ice: iceServers });
+    push(client, { type: 'welcome', peerId, ice: iceServers, hostOnline: s.hosts.size > 0 });
     toHosts(s, { type: 'peer-join', peerId });
     ws.on('close', () => {
       if (s.peers.get(peerId) !== client) return;
@@ -268,8 +276,9 @@ export function createApp({
       push(target, { type: 'signal', data: body.data });
       s.hostSeenAt = Date.now();
     } else {
-      // 观看者 → 分享者：必须是当前在线的观看者，分享者不在线时直接丢弃，对方会重试
+      // 观看者 → 分享者：必须是当前在线的观看者。分享者不在线时退回，由观看者稍后重发
       if (!s.peers.has(body.peer)) throw new HttpError(403, 'unknown_peer');
+      if (!s.hosts.size) throw new HttpError(404, 'no_host');
       toHosts(s, { type: 'signal', from: body.peer, data: body.data });
     }
     sendJSON(res, 202, { ok: true });
@@ -281,6 +290,10 @@ export function createApp({
 
   function toHosts(s, msg) {
     for (const c of s.hosts) push(c, msg);
+  }
+
+  function toPeers(s, msg) {
+    for (const c of s.peers.values()) push(c, msg);
   }
 
   function clientsOf(s) {

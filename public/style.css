@@ -537,13 +537,6 @@ h1 {
   max-width: 20em;
 }
 
-/* 分享者暂时离开：观看端遮住照片，只留提示，对方回来后再显示 */
-.stage.is-paused .photo,
-.stage.is-paused .ambient,
-.stage.is-paused .counter {
-  visibility: hidden;
-}
-
 .spinner {
   width: 26px;
   height: 26px;

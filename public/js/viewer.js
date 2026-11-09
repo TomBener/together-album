@@ -1,8 +1,9 @@
-import { $, api, toast, showView, showNotice, keepScreenOn, STALL_MS } from './util.js';
+import { $, api, toast, showView, showNotice, keepScreenOn, STALL_MS, DEBUG } from './util.js';
 import { t, langQuery } from './i18n.js';
 import { subscribe } from './live.js';
 import { createStage, bindSwipe } from './stage.js';
 import { ViewerLink, randomId } from './rtc.js';
+import { unseal, fromBase64 } from './seal.js';
 
 const RETRY_MS = 15_000; // 这么久还没连上，就请分享者重新发起连接
 const AWAY_DELAY_MS = 4000; // 分享者的信令断开这么久还没回来，才算“暂时离开”；常见的短暂断线不必惊动观看者
@@ -14,9 +15,10 @@ export function startViewer(sessionId) {
   const stageEl = $('#stage');
   const stage = createStage(stageEl);
   const peerId = randomId(); // 整个页面生命周期不变，信令断线重连不会被当成新观看者
-  const photos = new Map(); // 照片 id → blob URL
-  // 第几张 → 照片 id。只记分享者翻到并停留过的照片，观看者只能在这些照片里来回翻；
-  // 快速连翻时传到一半就被跳过的照片不在其中
+  // 照片 id → { index, secret, parts, urls, chain }：分享者翻到它时是第几张（没翻到为 -1）、它的钥匙、
+  // 收到了还没打开的数据（preview、full）、打开后能显示的地址。提前收到的照片没有钥匙，打不开
+  const pics = new Map();
+  // 第几张 → 照片 id。只记分享者翻到过、而且已经能显示的照片，观看者只能在这些照片里来回翻
   const seen = new Map();
   const V = {
     link: null,
@@ -26,11 +28,15 @@ export function startViewer(sessionId) {
     progress: null,
     index: -1, // 这台设备正在看的
     host: -1, // 分享者正在看的
+    hostId: null,
+    shownId: null, // 舞台上这张照片的 id
+    shownKind: null, // 舞台上是预览（preview）还是原画质（full）
     total: 0,
     viewers: 0, // 几人在看，由分享者告知
     peak: 0, // 这次分享里最多同时几人在看
     hostOnline: true, // 分享者的页面开着（服务器告知）
-    away: false, // 分享者离开了一阵：遮住照片，等对方回来
+    hostHere: true, // 分享者的页面在前台（分享者经直连告知，比服务器快）
+    away: false, // 分享者离开了一阵。照片照常显示，状态栏提示一下
     relayed: false, // 经中转连上
     following: true, // 跟着分享者翻；自己翻到别处后为 false，直到回到分享者那一张
     hinted: false,
@@ -52,16 +58,18 @@ export function startViewer(sessionId) {
         V.link ??= new ViewerLink({
           iceServers: msg.ice,
           signal,
+          have,
           onState,
           onRoute,
-          onPhoto,
+          onPart,
           onShow,
           onViewers,
           onProgress,
+          onHere,
           onEnd: () => end('ended'),
         });
         V.link.iceServers = msg.ice; // 服务器可能后来才领到中转凭证
-        // 刚打开链接时分享者就不在：直接说明，不必等。之后信令重连时照常等几秒，免得短暂断线就遮住照片
+        // 刚打开链接时分享者就不在：直接说明，不必等。之后信令重连时照常等几秒，免得短暂断线就提示“对方暂时离开”
         hostPresence(msg.hostOnline !== false, { now: first });
       } else if (msg.type === 'host') {
         hostPresence(msg.online);
@@ -145,40 +153,133 @@ export function startViewer(sessionId) {
     render();
   }
 
+  // 分享者切到别的 App、锁屏或回来了
+  function onHere(on) {
+    V.hostHere = on;
+    render();
+  }
+
   function onRoute(relayed) {
     V.relayed = relayed;
     render();
   }
 
-  function onProgress(fraction) {
+  // 只显示分享者正在看的这张的进度；提前发的照片在后台传，不显示
+  function onProgress({ id, kind, fraction }) {
+    if (id !== V.hostId || !V.following) return;
+    const p = pics.get(id);
+    if (!p || p.urls.full || (kind === 'preview' && p.urls.preview)) return;
     V.progress = fraction;
     render();
   }
 
-  function onPhoto({ id, blob }) {
+  const pic = (id) => {
+    let p = pics.get(id);
+    if (!p) pics.set(id, (p = { index: -1, secret: null, parts: {}, urls: {}, chain: Promise.resolve() }));
+    return p;
+  };
+  const bestUrl = (p) => p?.urls.full ?? p?.urls.preview;
+
+  // 已经能显示的照片。连接断了又连上时告诉分享者，不必重发
+  function have() {
+    const parts = [];
+    for (const [id, p] of pics) for (const kind of ['preview', 'full']) if (p.urls[kind]) parts.push(`${id}:${kind}`);
+    return parts;
+  }
+
+  // 收到一张照片的预览或原画质。分享者已经翻到这张（有钥匙）就打开，否则先存着
+  function onPart({ id, kind, type, iv, data }) {
     if (V.ended) return;
-    URL.revokeObjectURL(photos.get(id) ?? '');
-    photos.set(id, URL.createObjectURL(blob));
-    V.progress = null;
+    const p = pic(id);
+    if (p.urls[kind]) return;
+    p.parts[kind] = { type, iv, data };
+    unlock(id);
+  }
+
+  // 有钥匙（或本来没加密）的数据解开，生成能显示的地址
+  function unlock(id) {
+    const p = pics.get(id);
+    for (const kind of ['preview', 'full']) {
+      const part = p.parts[kind];
+      if (!part || (part.iv && !p.secret)) continue;
+      p.parts[kind] = null;
+      const secret = p.secret;
+      p.chain = p.chain.then(async () => {
+        if (p.urls[kind]) return;
+        let blob;
+        try {
+          const data = part.iv ? await unseal(secret, fromBase64(part.iv), await part.data.arrayBuffer()) : part.data;
+          blob = new Blob([data], { type: part.type });
+        } catch {
+          // 钥匙对不上：分享者重新打开过页面、换了钥匙。数据留着，等新钥匙或重发的数据到了再试
+          if (!p.parts[kind]) p.parts[kind] = part;
+          return;
+        }
+        if (V.ended) return;
+        p.urls[kind] = URL.createObjectURL(blob);
+        arrived(id, kind);
+      });
+    }
+  }
+
+  // 分享者翻页、加照片或重连时都会发来，带着这张照片的钥匙；张数变了但还是同一张时什么也不用做
+  function onShow({ id, index, total, key }) {
+    if (typeof id !== 'string' || !Number.isInteger(index)) return;
+    V.total = total;
+    const p = pic(id);
+    if (typeof key === 'string') {
+      try {
+        p.secret = fromBase64(key);
+      } catch {
+        // 钥匙格式不对：当作没有
+      }
+    }
+    p.index = index;
+    const moved = id !== V.hostId;
+    V.host = index;
+    V.hostId = id;
+    if (moved) V.progress = null;
+    if (id === V.shownId) V.following = true; // 分享者翻到了这边正在看的这张，重新同步
+    unlock(id);
+    if (bestUrl(p)) reveal(id, moved);
+    else if (moved && !V.following) nudge();
     render();
   }
 
-  // 分享者翻页、加照片或重连时都会发来；张数变了但还是同一张时什么也不用做
-  function onShow({ id, index, total }) {
-    V.total = total;
-    if (photos.has(id)) {
-      const moved = index !== V.host;
-      seen.set(index, id);
-      V.host = index;
-      if (index === V.index) V.following = true; // 分享者翻到了这边正在看的这张，重新同步
-      else if (V.following) display(index);
-      else if (moved) nudge();
-      if (!V.hinted && seen.size === 2) {
-        V.hinted = true;
-        toast(t(isTouch ? 'lookBackTouch' : 'lookBackKeys'));
-      }
+  // 预览或原画质打开了
+  function arrived(id, kind) {
+    const p = pics.get(id);
+    if (p.index < 0) return; // 分享者还没翻到这张
+    if (id === V.shownId) {
+      if (kind === 'full' && V.shownKind !== 'full') sharpen();
+    } else if (id === V.hostId) {
+      reveal(id, false);
+    } else if (!seen.has(p.index)) {
+      seen.set(p.index, id); // 分享者翻过、没停留的照片，之后也能回看
     }
+    if (id === V.hostId && p.urls.full) V.progress = null;
     render();
+  }
+
+  // 分享者正在看的这张能显示了：跟着翻的话马上换上，自己在回看时只提示一下
+  function reveal(id, moved) {
+    const p = pics.get(id);
+    const fresh = seen.get(p.index) !== id;
+    seen.set(p.index, id);
+    if (V.following) display(p.index);
+    else if (moved || fresh) nudge();
+    if (!V.hinted && seen.size === 2) {
+      V.hinted = true;
+      toast(t(isTouch ? 'lookBackTouch' : 'lookBackKeys'));
+    }
+  }
+
+  // 舞台上的预览换成原画质，原地淡入
+  function sharpen() {
+    const url = pics.get(V.shownId)?.urls.full;
+    if (!url) return;
+    V.shownKind = 'full';
+    stage.show(url, 0, { swap: true });
   }
 
   // 超过之前的最多人数才提示有人加入：分享者从后台回来、大家陆续重连时人数也会一个个涨回去
@@ -190,11 +291,25 @@ export function startViewer(sessionId) {
   }
 
   function display(index) {
+    const id = seen.get(index);
+    const p = pics.get(id);
+    const url = bestUrl(p);
+    if (!url) return;
     const direction = V.index === -1 ? 0 : Math.sign(index - V.index);
+    const swap = id === V.shownId; // 同一张从预览换成原画质
     V.index = index;
+    V.shownId = id;
+    V.shownKind = p.urls.full ? 'full' : 'preview';
     V.following = index === V.host;
-    stage.show(photos.get(seen.get(index)), direction);
+    stage.show(url, swap ? 0 : direction, { swap });
     wake();
+    render();
+  }
+
+  // 回到分享者正在看的这张；还没收到的话，收到后自动换上
+  function resync() {
+    V.following = true;
+    if (seen.get(V.host) === V.hostId) display(V.host);
     render();
   }
 
@@ -208,7 +323,7 @@ export function startViewer(sessionId) {
   }
 
   function go(step) {
-    if (V.ended || V.index < 0 || paused()) return;
+    if (V.ended || V.index < 0) return;
     const index = neighbor(step);
     if (index === null) blocked(step);
     else display(index);
@@ -238,8 +353,8 @@ export function startViewer(sessionId) {
     live.close();
     V.link?.reset();
     stage.clear();
-    for (const url of photos.values()) URL.revokeObjectURL(url);
-    photos.clear();
+    for (const p of pics.values()) for (const url of Object.values(p.urls)) URL.revokeObjectURL(url);
+    pics.clear();
     seen.clear();
     const home = { label: t('backHome'), href: `/${langQuery}` };
     showNotice(
@@ -249,42 +364,39 @@ export function startViewer(sessionId) {
     );
   }
 
-  // 分享者离开了一阵、直连也断了：遮住照片，回来后再显示
-  function paused() {
-    return V.away && V.p2p !== 'open';
-  }
-
   function render() {
     if (V.ended) return;
-    const away = paused();
-    stageEl.classList.toggle('is-paused', away);
-    const receiving = V.progress === null ? null : `${Math.round(V.progress * 100)}%`;
+    // 分享者切走了，或者离开了一阵、直连也断了。照片照常显示，也能回看，只在状态栏提示
+    const away = (V.away && V.p2p !== 'open') || (!V.hostHere && V.p2p === 'open');
+    const loading = V.progress !== null && V.following;
+    // 分享者翻到的这张还一点都没显示出来时，状态栏显示接收进度；预览出来后只留顶部的进度条
+    const receiving = loading && V.shownId !== V.hostId ? `${Math.round(V.progress * 100)}%` : null;
     let state = 'wait';
     let text = t('connecting');
-    if (V.p2p === 'open') {
+    if (away) {
+      [state, text] = ['warn', t('hostAway')];
+    } else if (V.p2p === 'open') {
       state = 'live';
       text = receiving ? t('receiving', receiving) : V.viewers ? t('watching', V.viewers) : t('live');
-      if (V.relayed && !receiving) text += ` · ${t('relayed')}`;
-    } else if (away) [state, text] = ['warn', t('hostAway')];
-    else if (V.p2p === 'disconnected') [state, text] = ['warn', t('unstable')];
+      if (DEBUG && V.relayed && !receiving) text += ` · ${t('relayed')}`; // 排查用（网址带 ?debug=1）
+    } else if (V.p2p === 'disconnected') [state, text] = ['warn', t('unstable')];
     else if (V.failures) [state, text] = ['warn', t('retrying')];
     else if (!V.link || V.signaling !== 'live') text = t('connecting');
     $('#status').dataset.state = state;
     $('#status .chip-text').textContent = text;
 
     $('#counter').textContent = V.index >= 0 ? `${V.index + 1} / ${V.total}` : '';
-    $('#btn-resync').hidden = away || V.following || V.host < 0;
+    $('#btn-resync').hidden = V.following || V.host < 0;
     $('#resync-text').textContent = t('backToLive', V.host + 1);
-    $('#btn-prev').disabled = away || neighbor(-1) === null;
-    $('#btn-next').disabled = away || neighbor(1) === null;
-    $('#recv').classList.toggle('is-active', V.progress !== null);
+    $('#btn-prev').disabled = neighbor(-1) === null;
+    $('#btn-next').disabled = neighbor(1) === null;
+    $('#recv').classList.toggle('is-active', loading);
     $('#recv').style.setProperty('--progress', V.progress ?? 0);
 
     let wait = null;
-    if (away) {
-      wait = t('hostAwayText');
-    } else if (V.index < 0) {
-      if (V.p2p === 'open') wait = receiving ? t('receivingPhoto', receiving) : t('waitingFirst');
+    if (V.index < 0) {
+      if (away) wait = t('hostAwayText');
+      else if (V.p2p === 'open') wait = receiving ? t('receivingPhoto', receiving) : t('waitingFirst');
       else if (V.hostOnline && (V.failures || V.stalled)) wait = t('connectHint');
       else if (V.link) wait = t('connectingPeer');
       else wait = t('connecting');
@@ -315,19 +427,19 @@ export function startViewer(sessionId) {
     step: go,
     blocked,
     tap: () => (stageEl.classList.contains('is-idle') ? wake() : rest()),
-    enabled: () => !zoomed() && V.index >= 0 && !paused(),
+    enabled: () => !zoomed() && V.index >= 0,
   });
   $('#btn-prev').addEventListener('click', () => go(-1));
   $('#btn-next').addEventListener('click', () => go(1));
-  $('#btn-resync').addEventListener('click', () => !paused() && display(V.host));
+  $('#btn-resync').addEventListener('click', resync);
   document.addEventListener('keydown', (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     const step = { ArrowRight: 1, ArrowDown: 1, PageDown: 1, ArrowLeft: -1, ArrowUp: -1, PageUp: -1 }[e.key];
     if (step) {
       e.preventDefault();
       go(step);
-    } else if ((e.key === 'Enter' || e.key === 'Escape') && !V.following && V.host >= 0 && !paused() && e.target === document.body) {
-      display(V.host);
+    } else if ((e.key === 'Enter' || e.key === 'Escape') && !V.following && V.host >= 0 && e.target === document.body) {
+      resync();
     }
   });
 
@@ -340,6 +452,10 @@ export function startViewer(sessionId) {
     const result = document.fullscreenElement || document.webkitFullscreenElement ? exit.call(document) : enter.call(root);
     result?.catch?.(() => {});
   });
+
+  // 切到别的 App、锁屏或关掉页面时告诉分享者，他那边显示“朋友暂时离开”
+  document.addEventListener('visibilitychange', () => V.link?.sendHere(document.visibilityState === 'visible'));
+  window.addEventListener('pagehide', () => V.link?.sendHere(false));
 
   keepScreenOn();
   render();

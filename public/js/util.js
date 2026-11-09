@@ -5,6 +5,11 @@ export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // 连了这么久还没连上，就给两端看怎么解决（i18n 的 connectHint）。正常情况下直连或中转几秒内就能连上
 export const STALL_MS = 10_000;
 
+// 网址带 ?debug=1（或测中转用的 ?relay=1）时，状态栏标出这条连接是直连还是经中转。
+// 只给网站所有者排查用，朋友不需要知道
+const params = new URLSearchParams(location.search);
+export const DEBUG = params.has('debug') || params.has('relay');
+
 export function showView(id) {
   for (const view of document.querySelectorAll('.view')) view.hidden = view.id !== id;
 }

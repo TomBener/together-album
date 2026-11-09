@@ -1,9 +1,10 @@
-import { $, api, sleep, toast, showView, showNotice, keepScreenOn, copyText, STALL_MS } from './util.js';
+import { $, api, sleep, toast, showView, showNotice, keepScreenOn, copyText, STALL_MS, DEBUG } from './util.js';
 import { t, langQuery } from './i18n.js';
 import { subscribe } from './live.js';
 import { createStage, bindSwipe } from './stage.js';
-import { prepareImage, shrink } from './images.js';
-import { HostLink } from './rtc.js';
+import { prepareImage, previewOf } from './images.js';
+import { HostLink, randomId } from './rtc.js';
+import { canSeal, newSecret, seal, toBase64 } from './seal.js';
 import * as keep from './keep.js';
 
 const MAX_PHOTOS = 100;
@@ -20,10 +21,11 @@ const S = {
   key: null,
   createdAt: 0,
   iceServers: [],
-  items: [], // 缩略条里的每一张：{ el, img, ready, id, index, blob, url, thumbUrl }
+  items: [], // 缩略条里的每一张：{ el, img, ready, id, index, blob, url, thumbUrl, secret, payload }
   photos: [], // 已准备好的照片，按顺序
   index: -1,
   links: new Map(), // 观看者 peerId → HostLink
+  met: new Set(), // 连上过的观看者。都断开时显示“朋友暂时离开”，而不是“等待朋友加入”
   joinUrls: [],
   urlChoice: 0,
   conn: 'connecting',
@@ -35,6 +37,11 @@ const S = {
 
 let stage;
 let creating = false;
+const unsaved = []; // 分享还没建好时就处理完的照片：[item, 各版本]，建好后再暂存
+// 加密好、准备发给观看者的数据，几位观看者共用。只留最近用到的几份：iPhone 上页面内存紧，
+// 每张照片都留一份的话，翻完 100 张要多占约 100 MB。用到被丢掉的那份时重新加密，几毫秒
+const PAYLOAD_KEEP = 12;
+const payloads = new Map(); // '照片id:版本' → Promise<{ bytes, type, iv }>
 let prepareChain = Promise.resolve(); // 逐张压缩，顺序与选择顺序一致
 let inviteSignature = '';
 let openBefore = 0;
@@ -90,7 +97,7 @@ async function restorePhotos(keepKey) {
   keep.useKey(keepKey);
   const photos = await keep.loadPhotos(S.id);
   if (S.ended) return;
-  for (const p of photos) markReady(addItem(), p.full, p.thumb, { restored: true });
+  for (const p of photos) markReady(addItem(), p, { restored: true });
   S.resuming = null; // 取回之后才能添加新照片，新照片接在后面
   if (S.photos.length) setIndex(Math.min(Math.max(pending.index, 0), S.photos.length - 1));
   remember();
@@ -108,20 +115,50 @@ async function onPick() {
     toast(t('resuming')); // 先等暂存的照片取回来，新照片排在它们后面
     return;
   }
-  if (!S.id) {
-    if (creating) return;
-    creating = true;
-    try {
-      begin(await api('/api/sessions', { method: 'POST' }));
-    } catch {
-      toast(t('networkLater'));
-      return;
-    } finally {
-      creating = false;
-    }
-    openInvite();
-  }
+  if (!S.id && !creating) createSession(); // 不等服务器：照片马上显示、开始处理，分享同时在建
   addFiles(files);
+}
+
+async function createSession() {
+  creating = true;
+  showView('stage');
+  render();
+  try {
+    begin(await postSession());
+    openInvite();
+  } catch {
+    toast(t('networkLater'));
+    abandon();
+  } finally {
+    creating = false;
+  }
+}
+
+// 网络出错或服务器出错时重试两次；请求太频繁（429）等其他错误不重试
+async function postSession() {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await api('/api/sessions', { method: 'POST' });
+    } catch (err) {
+      if (attempt >= 2 || (err.status && err.status < 500)) throw err;
+      await sleep(600 * 2 ** attempt);
+    }
+  }
+}
+
+// 分享没建成：回到首页，丢掉刚选的照片
+function abandon() {
+  for (const item of S.items) {
+    item.el.remove();
+    for (const url of [item.thumbUrl, item.url]) if (url) URL.revokeObjectURL(url);
+  }
+  S.items = [];
+  S.photos = [];
+  S.index = -1;
+  unsaved.length = 0;
+  payloads.clear();
+  stage.clear();
+  showView('landing');
 }
 
 function begin(session, createdAt = Date.now()) {
@@ -131,6 +168,7 @@ function begin(session, createdAt = Date.now()) {
   S.iceServers = session.ice;
   S.joinUrls = session.joinUrls;
   if (session.keepKey) keep.useKey(session.keepKey);
+  for (const [item, parts] of unsaved.splice(0)) keep.savePhoto(S.id, item.index, parts);
   remember();
   showView('stage');
   holdLock();
@@ -150,7 +188,7 @@ function begin(session, createdAt = Date.now()) {
 
 // 记下会话，分享页被关掉后重新打开时用。照片还没取回时不记，免得盖掉上次看到第几张
 function remember() {
-  if (S.ended || S.resuming) return;
+  if (S.ended || S.resuming || !S.id) return;
   keep.saveSession({
     id: S.id,
     key: S.key,
@@ -230,7 +268,7 @@ function connectPeer(peerId) {
     onChange: render,
   });
   S.links.set(peerId, link);
-  if (S.index >= 0) link.show(S.photos[S.index], S.index, S.photos.length);
+  link.focus(S.photos, S.index);
   setTimeout(() => {
     if (S.ended || S.links.get(peerId) !== link || link.open || stallHinted.has(peerId)) return;
     stallHinted.add(peerId);
@@ -286,6 +324,8 @@ function teardown(sayEnd) {
   }
   S.items = [];
   S.photos = [];
+  unsaved.length = 0;
+  payloads.clear();
 }
 
 // 分享在另一个页面里接着进行了：这里停下，但不结束分享，也不删暂存的照片
@@ -320,13 +360,14 @@ function addFiles(files) {
   for (const [i, file] of files.entries()) {
     const item = items[i];
     prepareChain = prepareChain.then(async () => {
-      if (S.ended) return;
+      const dropped = () => S.ended || !S.items.includes(item); // 分享结束了，或者分享没建成、照片已丢掉
+      if (dropped()) return;
       try {
-        const { full, thumb } = await prepareImage(file);
-        if (S.ended) return;
-        markReady(item, full, thumb);
+        const parts = await prepareImage(file);
+        if (dropped()) return;
+        markReady(item, parts);
       } catch {
-        dropItem(item);
+        if (!dropped()) dropItem(item);
       }
     });
   }
@@ -342,33 +383,56 @@ function addItem() {
   img.alt = '';
   img.decoding = 'async';
   el.append(img);
-  const item = { el, img, ready: false, id: null, index: -1, blob: null, url: null, thumbUrl: null, small: null };
+  const item = { el, img, ready: false, id: null, index: -1, blob: null, url: null, thumbUrl: null, secret: null, payload: null };
   el.addEventListener('click', () => item.ready && go(item.index));
   $('#strip').insertBefore(el, $('#strip .thumb-add'));
   S.items.push(item);
   return item;
 }
 
-function markReady(item, full, thumb, { restored = false } = {}) {
+// parts：{ full, preview, thumb }，恢复的照片还带着原来的 id（旧版本存的没有 id 和 preview）
+function markReady(item, { id, full, preview, thumb }, { restored = false } = {}) {
   item.index = S.photos.push(item) - 1;
-  let smaller = null;
+  // 每张照片一把钥匙：提前发给观看者的数据用它锁上，分享者翻到这张时才把钥匙发过去。
+  // 钥匙只在这个页面的内存里，不暂存；重新打开分享页时换新钥匙
+  const secret = canSeal ? newSecret() : null;
   Object.assign(item, {
     ready: true,
-    id: String(item.index),
+    id: id ?? randomId(6),
     blob: full,
     url: URL.createObjectURL(full),
     thumbUrl: URL.createObjectURL(thumb),
-    // 经中转发送时用的小一档的版本，第一次用到时才生成
-    small: () => (smaller ??= shrink(full).catch(() => full)),
+    secret: secret && toBase64(secret),
+    // 发给观看者的数据：preview 是先发的小图，full 是原画质
+    payload: (kind) => payloadOf(`${item.id}:${kind}`, () => encodePart(kind === 'full' ? full : (preview ?? previewOf(full)), secret)),
   });
   item.img.src = item.thumbUrl;
   item.el.classList.remove('is-pending');
   item.el.setAttribute('aria-label', t('photoN', item.index + 1));
   if (restored) return; // 恢复时由 resume 统一决定展示哪张
-  keep.savePhoto(S.id, item.index, full, thumb);
+  const parts = { id: item.id, full, preview, thumb };
+  if (S.id) keep.savePhoto(S.id, item.index, parts);
+  else unsaved.push([item, parts]);
   if (S.index === -1) setIndex(0); // 第一张好了就直接展示，朋友扫码即可看到
   else broadcast(); // 总张数变了
   render();
+}
+
+function payloadOf(key, make) {
+  let payload = payloads.get(key);
+  if (payload) payloads.delete(key); // 放到最后，算最近用过
+  else payload = make();
+  payloads.set(key, payload);
+  while (payloads.size > PAYLOAD_KEEP) payloads.delete(payloads.keys().next().value);
+  return payload;
+}
+
+async function encodePart(source, secret) {
+  const blob = await source;
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  if (!secret) return { bytes, type: blob.type };
+  const { iv, data } = await seal(secret, bytes);
+  return { bytes: data, type: blob.type, iv: toBase64(iv) };
 }
 
 function dropItem(item) {
@@ -406,10 +470,10 @@ function setIndex(index) {
   render();
 }
 
-// 只把当前这一张发给观看者；没翻到的照片不会离开这台设备
+// 告诉每位观看者翻到了哪张。连接按先后发当前这张和前后几张，前后几张是锁着的，翻到时才发钥匙
 function broadcast() {
   if (S.index < 0) return;
-  for (const link of S.links.values()) link.show(S.photos[S.index], S.index, S.photos.length);
+  for (const link of S.links.values()) link.focus(S.photos, S.index);
 }
 
 // ---- 界面 ----
@@ -417,29 +481,34 @@ function broadcast() {
 function render() {
   if (S.ended) return;
   const links = [...S.links.values()];
-  const open = links.filter((l) => l.open).length;
-  for (const link of links) link.setViewers(open);
-  // 还没打开通道、也没失败的都算在连：网络层已连通、通道还差一步时也是
-  const connecting = links.filter((l) => !l.open && l.state !== 'failed' && l.state !== 'closed').length;
+  // 只算正在看的：页面切到后台或网络中断的朋友算暂时离开
+  const present = links.filter((l) => l.present).length;
+  // 连着的（含暂时离开的），只用来判断有没有新朋友加入：朋友从后台回来时不再提示一遍
+  const joined = links.filter((l) => l.open).length;
+  for (const link of links) link.setViewers(present);
+  // 还没连上过、也没失败的都算在连：网络层已连通、通道还差一步时也是。连上过又断开的算暂时离开
+  const connecting = links.filter((l) => !l.wasOpen && l.state !== 'failed' && l.state !== 'closed').length;
 
   let state = 'live';
-  let text = t('watching', open);
-  // 有人经中转连上时标出来：中转时照片发得慢一些，也改发小一档的
-  if (links.some((l) => l.open && l.relayed)) text += ` · ${t('relayed')}`;
-  if (!open) {
+  let text = t('watching', present);
+  for (const [peerId, link] of S.links) if (link.wasOpen) S.met.add(peerId);
+  // 排查时标出有人经中转连上（网址带 ?debug=1）
+  if (DEBUG && links.some((l) => l.present && l.relayed)) text += ` · ${t('relayed')}`;
+  if (!present) {
     if (S.conn !== 'live') [state, text] = ['warn', t(S.conn === 'connecting' ? 'connecting' : 'reconnecting')];
     else if (connecting) [state, text] = ['wait', t('friendConnecting')];
+    else if (S.met.size) [state, text] = ['wait', t('friendAway')];
     else [state, text] = ['wait', t('waitingFriends')];
   }
   $('#status').dataset.state = state;
   $('#status .chip-text').textContent = text;
 
-  if (open > openBefore) {
+  if (joined > openBefore) {
     if ($('#invite').open) $('#invite').close();
     if (openBefore === 0) toast(t(isTouch ? 'friendJoinedTouch' : 'friendJoinedMouse'));
-    else toast(t('joined', open));
+    else toast(t('joined', present));
   }
-  openBefore = open;
+  openBefore = joined;
 
   const pending = S.items.filter((i) => !i.ready).length;
   const parts = [];
@@ -451,6 +520,8 @@ function render() {
   $('#placeholder-text').textContent = t(S.resuming ? 'resuming' : S.items.length ? 'preparingPhotos' : 'pickToContinue');
   $('#btn-prev').disabled = S.index <= 0;
   $('#btn-next').disabled = S.index >= S.photos.length - 1;
+  // 分享还在建：还没有链接可邀请，也没有分享可结束
+  $('#btn-invite').disabled = $('#btn-end').disabled = !S.id;
 
   if ($('#invite').open) renderInvite();
 }
@@ -562,6 +633,16 @@ function bindControls() {
     } else if (e.key === 'End') {
       go(S.photos.length - 1);
     }
+  });
+
+  // 切到别的 App、锁屏或关掉页面时马上告诉观看者，他们那边显示“对方暂时离开”
+  const here = () => {
+    const on = document.visibilityState === 'visible';
+    for (const link of S.links.values()) link.sendHere(on);
+  };
+  document.addEventListener('visibilitychange', here);
+  window.addEventListener('pagehide', () => {
+    for (const link of S.links.values()) link.sendHere(false);
   });
 
   // 滑动翻页；点按左右三分之一处也能翻

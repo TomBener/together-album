@@ -46,16 +46,21 @@ export function createStage(root) {
   return {
     frame,
 
-    async show(src, direction = 0) {
+    /**
+     * 换上一张照片。direction 是翻页方向（1 下一张，-1 上一张，0 原地淡入）。
+     * swap 为真时是同一张照片换成更清楚的版本：原地交叉淡入，不缩放。
+     */
+    async show(src, direction = 0, { swap = false } = {}) {
       if (src === shown) return settle();
       const t = ++token;
       const incoming = layers[1 - front];
       const width = frame.clientWidth;
-      const travel = still.matches ? 0 : direction;
+      const travel = still.matches || swap ? 0 : direction;
+      const flat = still.matches || swap;
 
       incoming.classList.add('no-anim');
       incoming.classList.remove('is-front', 'is-settling');
-      place(incoming, travel * ENTER * width, direction || still.matches ? 1 : 0.96);
+      place(incoming, travel * ENTER * width, travel || flat ? 1 : 0.96);
       incoming.src = src;
       try {
         await incoming.decode();
@@ -72,7 +77,7 @@ export function createStage(root) {
       place(incoming, 0, 1);
       // 拖动翻页时旧照片从手指松开的位置接着往外走
       outgoing.classList.remove('no-anim', 'is-front', 'is-settling');
-      place(outgoing, dragX - travel * EXIT * width * (dragX ? 2 : 1), still.matches ? 1 : 0.92);
+      place(outgoing, dragX - travel * EXIT * width * (dragX ? 2 : 1), flat ? 1 : 0.92);
       dragX = 0;
       front = 1 - front;
       paintGlow(incoming);

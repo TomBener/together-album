@@ -1,9 +1,9 @@
 const MAX_EDGE = 2048; // 手机、平板、笔记本全屏都够清晰，单张约 0.3–1.2 MB（细节多的照片更大）
 const QUALITY = 0.85;
+// 预览：每次翻页先发这张小图，几十 KB，经中转也很快到；原画质随后换上
+const PREVIEW_EDGE = 640;
+const PREVIEW_QUALITY = 0.7;
 const THUMB_EDGE = 200;
-// 经中转发送时用的尺寸：手机全屏看仍然清楚，体积约为原图的三分之一到一半
-const RELAY_EDGE = 1280;
-const RELAY_QUALITY = 0.82;
 
 /**
  * 在浏览器里把照片缩小并重新编码为 JPEG。
@@ -17,21 +17,22 @@ export async function prepareImage(file) {
     img.src = url;
     await img.decode();
     const full = await encode(img, MAX_EDGE, QUALITY);
+    const preview = await encode(img, PREVIEW_EDGE, PREVIEW_QUALITY);
     const thumb = await encode(img, THUMB_EDGE, 0.7);
-    return { full, thumb };
+    return { full, preview, thumb };
   } finally {
     URL.revokeObjectURL(url);
   }
 }
 
-/** 把处理好的照片再缩小一档，经中转发送时用，每张少等几秒。 */
-export async function shrink(blob) {
+/** 从处理好的照片生成预览。暂存的照片没有预览时（旧版本存的）用。 */
+export async function previewOf(blob) {
   const url = URL.createObjectURL(blob);
   try {
     const img = new Image();
     img.src = url;
     await img.decode();
-    return await encode(img, RELAY_EDGE, RELAY_QUALITY);
+    return await encode(img, PREVIEW_EDGE, PREVIEW_QUALITY);
   } finally {
     URL.revokeObjectURL(url);
   }

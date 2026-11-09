@@ -1,16 +1,36 @@
 // WebRTC 点对点传输。照片走加密的 DataChannel（DTLS），服务器只转发建立连接用的信令。
-// 能直连时直连；直连不通时经 TURN 中继转发，中继只见到加密后的数据，这时改发小一些的照片。
+// 能直连时直连；直连不通时经 TURN 中继转发，中继只见到加密后的数据。
 //
-// 通道上的消息（按顺序、可靠送达）：
-//   { t: 'photo', id, size, type } 后面紧跟若干个二进制分片，合计 size 字节
-//   { t: 'show', id, index, total } 展示某张已送达的照片
-//   { t: 'viewers', count } 现在有几人在看（含对方自己），和分享者那边显示的人数一致
-//   { t: 'end' } 分享结束
+// 每条连接有两个通道，都按顺序、可靠送达。
+//
+// 控制通道 album：消息少而小，不排在照片数据后面，翻页消息马上到
+//   分享者 → 观看者 { t: 'show', id, index, total, key } 翻到了哪张；key 是这张照片的钥匙（不能加密时没有）
+//                  { t: 'viewers', count } 现在有几人在看（含对方自己），和分享者那边显示的人数一致
+//                  { t: 'end' } 分享结束
+//   观看者 → 分享者 { t: 'have', parts: ['照片id:preview', '照片id:full', …] } 已经能显示的照片，新连接不必重发
+//   双向           { t: 'here', on } 自己的页面在不在前台。切到别的 App、锁屏、关掉页面时马上告诉对方，
+//                  对方状态栏显示“暂时离开”，不用等连接超时（要几十秒）
+//
+// 照片通道 photos：
+//   { t: 'photo', n, id, kind, size, type, iv } 开始第 n 次传输：照片 id 的预览（preview）或原画质（full），
+//       共 size 字节；带 iv 时数据用这张照片的钥匙加密过
+//   二进制分片：前 4 字节是 n，后面是数据。几次传输的分片可以交错，同一次传输的分片按顺序
+//   { t: 'drop', n } 第 n 次传输不发了（分享者翻远了），观看者丢掉已收到的部分
+//
+// 分享者按 plan.js 的先后发：当前这张的预览、原画质，再提前发前后几张。提前发的照片锁着（seal.js），
+// 观看者收到 show 里的钥匙才能打开，所以分享者翻到哪张，对方才能看到哪张。
 
-const CHUNK = 16 * 1024; // 各浏览器都能稳定收发的分片大小（Safari 的上限比 Chrome 小）
-const HIGH_WATER = 1024 * 1024;
-const LOW_WATER = 256 * 1024;
+import { sendOrder } from './plan.js';
+import { canSeal } from './seal.js';
+
+const CHUNK = 16 * 1024; // 每条消息的大小上限，各浏览器都能稳定收发（Safari 的上限比 Chrome 小）
+const HEAD = 4; // 分片开头的传输编号
 const MAX_PHOTO_BYTES = 30 * 1024 * 1024;
+// 照片通道里排队等发的数据上限。分享者翻到还没发的照片时，要先等这些发完，所以不能排太多；
+// 中转时慢，排得更少。翻页消息走控制通道，不受影响
+const QUEUE_DIRECT = 512 * 1024;
+const QUEUE_RELAYED = 128 * 1024;
+const HAVE_WAIT_MS = 1000; // 新连接先等观看者说明手里有哪些照片，再开始发；等不到也照常发
 const NEGOTIATE_MS = 15_000; // 一次连接尝试这么久还没连上，就算失败，有机会就重来
 const SIGNAL_RETRY_MS = 30_000; // 信令发不出去时（对方或自己的实时通道正好断了）最多重发这么久
 // 网址带 ?relay=1 时只走中继，用来测试中转的速度
@@ -68,7 +88,7 @@ async function isRelayed(pc) {
   }
 }
 
-/** 分享者这一端：每位观看者一条。只在对方需要展示时才发送那一张照片。 */
+/** 分享者这一端：每位观看者一条。 */
 export class HostLink {
   constructor(peerId, { iceServers, signal, onChange }) {
     this.peerId = peerId;
@@ -77,9 +97,17 @@ export class HostLink {
     this.started = Date.now();
     this.closed = false;
     this.relayed = false;
-    this.sent = new Set();
-    this.wanted = null;
-    this.busy = false;
+    this.wasOpen = false; // 连上过。之后断开时，分享者那边显示“朋友暂时离开”
+    this.here = true; // 观看者的页面在前台
+    this.viewers = null;
+    this.focused = null; // { photos, index }：分享者翻到哪张
+    this.showed = '';
+    this.done = new Set(); // 对方已经有的 '照片id:版本'
+    this.transfers = new Map(); // '照片id:版本' → { n, header, bytes, offset, started }
+    this.count = 0;
+    this.synced = false; // 收到了对方的 have，或者等过了
+    this.pumping = false;
+    this.again = false;
     this.pending = [];
     this.outbox = Promise.resolve();
     this.inbox = Promise.resolve();
@@ -91,15 +119,14 @@ export class HostLink {
 
     const pc = (this.pc = peerConnection(iceServers));
     // 必须先建通道再 createOffer，否则 SDP 里没有数据通道
-    this.channel = pc.createDataChannel('album', { ordered: true });
-    this.channel.binaryType = 'arraybuffer';
-    this.channel.bufferedAmountLowThreshold = LOW_WATER;
-    this.channel.onopen = async () => {
-      this.relayed = await isRelayed(pc);
-      this.onChange(this);
-      this.flush();
-    };
-    this.channel.onclose = () => this.onChange(this);
+    this.control = pc.createDataChannel('album', { ordered: true });
+    this.data = pc.createDataChannel('photos', { ordered: true });
+    this.data.binaryType = 'arraybuffer';
+    this.data.bufferedAmountLowThreshold = QUEUE_RELAYED / 4;
+    this.data.onbufferedamountlow = () => this.pump();
+    this.control.onopen = this.data.onopen = () => this.opened();
+    this.control.onclose = this.data.onclose = () => this.onChange(this);
+    this.control.onmessage = ({ data }) => this.onControl(data);
     pc.onicecandidate = (e) => e.candidate && this.send({ candidate: e.candidate.toJSON() });
     pc.onconnectionstatechange = pc.oniceconnectionstatechange = () => this.onChange(this);
     this.start();
@@ -115,7 +142,7 @@ export class HostLink {
   }
 
   get open() {
-    return this.channel.readyState === 'open';
+    return this.control.readyState === 'open' && this.data.readyState === 'open';
   }
 
   get state() {
@@ -127,6 +154,15 @@ export class HostLink {
     if (this.open) return false;
     const state = this.state;
     return state === 'failed' || state === 'closed' || Date.now() - this.started > NEGOTIATE_MS;
+  }
+
+  /** 观看者正在看：连着、页面在前台、网络没有中断。 */
+  get present() {
+    return this.open && this.here && linkState(this.pc) !== 'disconnected';
+  }
+
+  get queueLimit() {
+    return this.relayed ? QUEUE_RELAYED : QUEUE_DIRECT;
   }
 
   receive(data) {
@@ -144,95 +180,203 @@ export class HostLink {
     }
   }
 
-  /** 让这位观看者看到某张照片；翻得快时只送最新那张。 */
-  show(photo, index, total) {
-    this.wanted = { photo, index, total };
-    this.flush();
+  // 两个通道都打开了：先告诉对方翻到哪张，等对方说明手里有哪些照片后开始发
+  opened() {
+    if (!this.open || this.wasOpen) return;
+    this.wasOpen = true;
+    setTimeout(() => this.sync(), HAVE_WAIT_MS);
+    this.onChange(this);
+    this.sendHere(document.visibilityState === 'visible');
+    this.announce();
+    this.route();
   }
 
-  async flush() {
-    if (this.busy || !this.open) return;
-    this.busy = true;
+  /** 告诉观看者分享者的页面在不在前台。 */
+  sendHere(on) {
+    this.sendControl({ t: 'here', on });
+  }
+
+  // 看一眼是不是经中转：刚连上时可能先走中转，过一会儿换成直连
+  async route() {
+    const relayed = await isRelayed(this.pc);
+    if (this.closed) return;
+    this.data.bufferedAmountLowThreshold = (relayed ? QUEUE_RELAYED : QUEUE_DIRECT) / 4;
+    if (relayed === this.relayed) return;
+    this.relayed = relayed;
+    this.onChange(this);
+  }
+
+  onControl(text) {
+    let msg;
     try {
-      while (this.wanted && this.open) {
-        const { photo, index, total } = this.wanted;
-        this.wanted = null;
-        if (!this.sent.has(photo.id)) {
-          // 每张发之前看一眼：刚连上时可能先走中继，过一会儿换成直连
-          this.relayed = await isRelayed(this.pc);
-          await this.sendPhoto(photo, this.relayed);
-          this.sent.add(photo.id);
-        }
-        if (this.wanted) continue; // 传输途中又翻页了，直接跳到最新一张
-        this.channel.send(JSON.stringify({ t: 'show', id: photo.id, index, total }));
-      }
+      msg = JSON.parse(text);
     } catch {
-      // 通道中途断开；重新连上后会建新的 HostLink 重发
+      return;
+    }
+    if (msg.t === 'have' && Array.isArray(msg.parts)) {
+      for (const part of msg.parts) if (typeof part === 'string') this.done.add(part);
+      this.sync();
+    } else if (msg.t === 'here') {
+      this.here = msg.on !== false;
+      this.onChange(this);
+    }
+  }
+
+  sync() {
+    if (this.synced || this.closed) return;
+    this.synced = true;
+    this.replan();
+    this.pump();
+  }
+
+  /** 分享者翻到了第 index 张，或者照片张数变了。 */
+  focus(photos, index) {
+    this.focused = { photos, index };
+    this.announce();
+    this.replan();
+    this.pump();
+  }
+
+  // 告诉对方现在翻到哪张，附上这张的钥匙
+  announce() {
+    const photo = this.focused?.photos[this.focused.index];
+    if (!photo || !this.open) return;
+    const { photos, index } = this.focused;
+    const signature = `${photo.id}|${index}|${photos.length}`;
+    if (signature === this.showed) return;
+    this.showed = signature;
+    this.sendControl({ t: 'show', id: photo.id, index, total: photos.length, key: photo.secret ?? undefined });
+    this.route();
+  }
+
+  // 还要发的 [照片, 版本]，按先后排好。已经有原画质的照片不再发预览
+  plan() {
+    if (!this.focused) return [];
+    const { photos, index } = this.focused;
+    const list = [];
+    for (const i of sendOrder(index, photos.length, canSeal)) {
+      const photo = photos[i];
+      if (this.done.has(`${photo.id}:full`)) continue;
+      if (!this.done.has(`${photo.id}:preview`)) list.push([photo, 'preview']);
+      list.push([photo, 'full']);
+    }
+    return list;
+  }
+
+  // 分享者翻远了：不再需要的传输停下，告诉对方丢掉收到一半的
+  replan() {
+    const wanted = new Set(this.plan().map(([photo, kind]) => `${photo.id}:${kind}`));
+    for (const [part, transfer] of this.transfers) {
+      if (wanted.has(part)) continue;
+      this.transfers.delete(part);
+      if (transfer.started) {
+        try {
+          this.data.send(JSON.stringify({ t: 'drop', n: transfer.n }));
+        } catch {
+          // 已断开
+        }
+      }
+    }
+  }
+
+  // 按先后把数据放进照片通道，排满为止；排着的数据发出去一些后（bufferedamountlow）再接着放。
+  // 同一时间只跑一个，别处要求再跑时记一笔，跑完这一轮再看一遍
+  async pump() {
+    if (this.pumping) {
+      this.again = true;
+      return;
+    }
+    this.pumping = true;
+    try {
+      do {
+        this.again = false;
+        while (this.synced && this.open && this.data.bufferedAmount < this.queueLimit) {
+          const next = this.plan()[0];
+          if (!next) break;
+          const [photo, kind] = next;
+          const part = `${photo.id}:${kind}`;
+          let transfer = this.transfers.get(part);
+          if (!transfer) {
+            transfer = { n: ++this.count, header: null, bytes: null, offset: 0, started: false };
+            this.transfers.set(part, transfer);
+            let payload;
+            try {
+              payload = await photo.payload(kind);
+            } catch {
+              // 这个版本生成不了：跳过，不卡住后面的
+              this.transfers.delete(part);
+              this.done.add(part);
+              continue;
+            }
+            if (this.transfers.get(part) !== transfer) continue; // 等的时候分享者翻远了
+            transfer.bytes = payload.bytes;
+            transfer.header = { t: 'photo', n: transfer.n, id: photo.id, kind, size: payload.bytes.byteLength, type: payload.type, iv: payload.iv };
+          }
+          if (!this.open) break;
+          if (!transfer.started) {
+            this.data.send(JSON.stringify(transfer.header));
+            transfer.started = true;
+          }
+          const { bytes } = transfer;
+          while (transfer.offset < bytes.byteLength && this.data.bufferedAmount < this.queueLimit) {
+            const end = Math.min(transfer.offset + CHUNK - HEAD, bytes.byteLength);
+            const chunk = new Uint8Array(HEAD + end - transfer.offset);
+            new DataView(chunk.buffer).setUint32(0, transfer.n);
+            chunk.set(bytes.subarray(transfer.offset, end), HEAD);
+            this.data.send(chunk);
+            transfer.offset = end;
+          }
+          if (transfer.offset < bytes.byteLength) break; // 排满了，等发出去一些
+          this.transfers.delete(part);
+          this.done.add(part);
+        }
+      } while (this.again);
+    } catch {
+      // 通道中途断开；重新连上后会建新的 HostLink，对方说明已有哪些照片后接着发
     } finally {
-      this.busy = false;
+      this.pumping = false;
     }
   }
 
-  async sendPhoto(photo, small) {
-    const blob = small ? await photo.small() : photo.blob;
-    const bytes = await blob.arrayBuffer();
-    if (!this.open) throw new Error('closed');
-    this.channel.send(JSON.stringify({ t: 'photo', id: photo.id, size: bytes.byteLength, type: blob.type }));
-    for (let offset = 0; offset < bytes.byteLength; offset += CHUNK) {
-      if (this.channel.bufferedAmount > HIGH_WATER) await this.drained();
-      this.channel.send(bytes.slice(offset, offset + CHUNK));
+  sendControl(msg) {
+    try {
+      if (this.control.readyState === 'open') this.control.send(JSON.stringify(msg));
+    } catch {
+      // 已断开
     }
-  }
-
-  drained() {
-    return new Promise((resolve) => {
-      const done = () => {
-        this.channel.removeEventListener('bufferedamountlow', done);
-        this.channel.removeEventListener('close', done);
-        resolve();
-      };
-      this.channel.addEventListener('bufferedamountlow', done);
-      this.channel.addEventListener('close', done);
-    });
   }
 
   /** 告诉对方现在有几人在看。按条记住发过的数，换了新连接的观看者即使总数没变也会收到。 */
   setViewers(count) {
     if (!this.open || this.viewers === count) return;
-    try {
-      this.channel.send(JSON.stringify({ t: 'viewers', count }));
-      this.viewers = count;
-    } catch {
-      // 已断开
-    }
+    this.sendControl({ t: 'viewers', count });
+    this.viewers = count;
   }
 
   /** 告诉对方分享结束（对方会立即清除照片），然后断开。 */
   end() {
-    try {
-      if (this.open) this.channel.send(JSON.stringify({ t: 'end' }));
-    } catch {
-      // 已断开
-    }
+    this.sendControl({ t: 'end' });
     setTimeout(() => this.close(), 300);
   }
 
   close() {
     this.closed = true;
-    this.wanted = null;
-    this.channel.onclose = null;
+    this.focused = null;
+    this.transfers.clear();
+    this.control.onclose = this.data.onclose = null;
     this.pc.close();
   }
 }
 
 /** 观看者这一端：接受分享者的连接，收照片和翻页指令。 */
 export class ViewerLink {
-  constructor({ iceServers, signal, onState, onRoute, onPhoto, onShow, onViewers, onProgress, onEnd }) {
+  constructor({ iceServers, signal, have, onState, onRoute, onPart, onShow, onViewers, onProgress, onHere, onEnd }) {
     this.iceServers = iceServers;
     this.signal = signal;
-    this.on = { onState, onRoute, onPhoto, onShow, onViewers, onProgress, onEnd };
+    this.have = have; // () => 已经能显示的 '照片id:版本'，新连接上告诉分享者
+    this.on = { onState, onRoute, onPart, onShow, onViewers, onProgress, onHere, onEnd };
     this.pc = null;
-    this.channel = null;
+    this.control = null;
     this.linkId = null;
     this.pending = [];
     this.inbox = Promise.resolve();
@@ -263,9 +407,13 @@ export class ViewerLink {
         if (!current()) return;
         const state = linkState(pc);
         // 短暂断开又恢复时，通道一直开着，不会再收到 open 事件，要在这里报回“已连上”
-        this.on.onState(state === 'connected' && this.channel?.readyState === 'open' ? 'open' : state);
+        this.on.onState(state === 'connected' && this.control?.readyState === 'open' ? 'open' : state);
       };
-      pc.ondatachannel = (e) => this.attach(e.channel, pc, current);
+      pc.ondatachannel = ({ channel }) => {
+        if (!current()) return; // 旧连接晚到的通道不要
+        if (channel.label === 'photos') this.attachPhotos(channel, current);
+        else this.attachControl(channel, pc, current);
+      };
       this.on.onState('connecting');
       await pc.setRemoteDescription(data.sdp);
       for (const c of this.pending.splice(0)) await pc.addIceCandidate(c).catch(() => {});
@@ -277,13 +425,29 @@ export class ViewerLink {
     }
   }
 
-  attach(channel, pc, current) {
-    if (!current()) return; // 旧连接晚到的通道不要
-    this.channel = channel;
-    channel.binaryType = 'arraybuffer';
-    let incoming = null;
+  /** 告诉分享者观看者的页面在不在前台。 */
+  sendHere(on) {
+    try {
+      if (this.control?.readyState === 'open') this.control.send(JSON.stringify({ t: 'here', on }));
+    } catch {
+      // 已断开
+    }
+  }
+
+  attachControl(channel, pc, current) {
+    this.control = channel;
+    let done = false;
+    // 浏览器可能在通道已经打开时才交给我们，之后又触发一次 open 事件，只处理一次
     const opened = () => {
-      if (!current()) return;
+      if (done || !current()) return;
+      done = true;
+      // 先说明手里已有哪些照片，分享者就不必重发
+      try {
+        channel.send(JSON.stringify({ t: 'have', parts: this.have() }));
+      } catch {
+        // 已断开
+      }
+      this.sendHere(document.visibilityState === 'visible');
       this.on.onState('open');
       isRelayed(pc).then((relayed) => current() && this.on.onRoute?.(relayed));
     };
@@ -291,36 +455,58 @@ export class ViewerLink {
     if (channel.readyState === 'open') opened();
     channel.onclose = () => current() && this.on.onState('closed');
     channel.onmessage = ({ data }) => {
+      if (!current() || typeof data !== 'string') return;
+      let msg;
+      try {
+        msg = JSON.parse(data);
+      } catch {
+        return;
+      }
+      if (msg.t === 'show') this.on.onShow(msg);
+      else if (msg.t === 'viewers') this.on.onViewers(msg.count);
+      else if (msg.t === 'here') this.on.onHere?.(msg.on !== false);
+      else if (msg.t === 'end') this.on.onEnd();
+    };
+  }
+
+  attachPhotos(channel, current) {
+    channel.binaryType = 'arraybuffer';
+    const incoming = new Map(); // 传输编号 → { id, kind, size, type, iv, chunks, received }
+    channel.onmessage = ({ data }) => {
       if (!current()) return;
       if (typeof data === 'string') {
-        const msg = JSON.parse(data);
+        let msg;
+        try {
+          msg = JSON.parse(data);
+        } catch {
+          return;
+        }
         if (msg.t === 'photo') {
-          incoming = msg.size > 0 && msg.size <= MAX_PHOTO_BYTES ? { ...msg, chunks: [], received: 0 } : null;
-        } else if (msg.t === 'show') {
-          this.on.onShow(msg);
-        } else if (msg.t === 'viewers') {
-          this.on.onViewers(msg.count);
-        } else if (msg.t === 'end') {
-          this.on.onEnd();
+          const valid = msg.size > 0 && msg.size <= MAX_PHOTO_BYTES && (msg.kind === 'preview' || msg.kind === 'full');
+          if (valid) incoming.set(msg.n, { ...msg, chunks: [], received: 0 });
+        } else if (msg.t === 'drop') {
+          incoming.delete(msg.n); // 不认识的编号（已经收完的）什么也不做
         }
         return;
       }
-      if (!incoming) return;
-      incoming.chunks.push(data);
-      incoming.received += data.byteLength;
-      this.on.onProgress(incoming.received / incoming.size);
-      if (incoming.received >= incoming.size) {
-        const type = /^image\/(jpeg|png|webp)$/.test(incoming.type) ? incoming.type : 'image/jpeg';
-        this.on.onPhoto({ id: incoming.id, blob: new Blob(incoming.chunks, { type }) });
-        incoming = null;
-      }
+      if (data.byteLength <= HEAD) return;
+      const part = incoming.get(new DataView(data).getUint32(0));
+      if (!part) return;
+      part.chunks.push(new Uint8Array(data, HEAD));
+      part.received += data.byteLength - HEAD;
+      this.on.onProgress({ id: String(part.id), kind: part.kind, fraction: Math.min(part.received / part.size, 1) });
+      if (part.received < part.size) return;
+      incoming.delete(part.n);
+      const type = /^image\/(jpeg|png|webp)$/.test(part.type) ? part.type : 'image/jpeg';
+      const iv = typeof part.iv === 'string' ? part.iv : null;
+      this.on.onPart({ id: String(part.id), kind: part.kind, type, iv, data: new Blob(part.chunks) });
     };
   }
 
   reset() {
     this.pc?.close();
     this.pc = null;
-    this.channel = null;
+    this.control = null;
     this.pending = [];
   }
 }

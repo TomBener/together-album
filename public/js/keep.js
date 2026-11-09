@@ -90,12 +90,22 @@ async function run(mode, fn) {
 
 const recordKey = (sessionId, index) => `${sessionId}:${String(index).padStart(3, '0')}`;
 
-/** 暂存一张处理好的照片。index 是它在分享里的顺序，恢复时按它排序。 */
-export async function savePhoto(sessionId, index, full, thumb) {
+/**
+ * 暂存一张处理好的照片。index 是它在分享里的顺序，恢复时按它排序。
+ * id 一起存下：恢复后照片 id 不变，观看者已经收到的照片不用重发。
+ */
+export async function savePhoto(sessionId, index, { id, full, preview, thumb }) {
   const key = await keyReady;
   if (!key) return;
   try {
-    const record = { sessionId, index, full: await seal(key, full), thumb: await seal(key, thumb) };
+    const record = {
+      sessionId,
+      index,
+      photoId: id,
+      full: await seal(key, full),
+      preview: preview ? await seal(key, preview) : null,
+      thumb: await seal(key, thumb),
+    };
     await run('readwrite', (store) => store.put(record, recordKey(sessionId, index)));
   } catch {
     // 空间不够等：这张不暂存，重新打开时提示分享者补上
@@ -103,7 +113,8 @@ export async function savePhoto(sessionId, index, full, thumb) {
 }
 
 /**
- * 取回某次分享暂存的照片：{ index, full, thumb }，按顺序排好。
+ * 取回某次分享暂存的照片：{ index, id, full, preview, thumb }，按顺序排好。
+ * 旧版本存的记录没有 id 和 preview，这时它们为 null。
  * 只要从第一张起连续的那些；中间缺了一张时，后面的也不要，免得重新添加的照片和旧照片错位。
  */
 export async function loadPhotos(sessionId) {
@@ -120,11 +131,16 @@ export async function loadPhotos(sessionId) {
   const photos = [];
   for (const r of records) {
     if (r.index !== photos.length) break;
+    let full, thumb;
     try {
-      photos.push({ index: r.index, full: await unseal(key, r.full), thumb: await unseal(key, r.thumb) });
+      full = await unseal(key, r.full);
+      thumb = await unseal(key, r.thumb);
     } catch {
       break; // 钥匙对不上或数据损坏：从这张起当作没有暂存
     }
+    // 预览可以重新生成，解不开时不影响这张照片
+    const preview = r.preview ? await unseal(key, r.preview).catch(() => null) : null;
+    photos.push({ index: r.index, id: r.photoId ?? null, full, preview, thumb });
   }
   const stale = records.filter((r) => r.index >= photos.length).map((r) => recordKey(sessionId, r.index));
   if (stale.length) run('readwrite', (store) => stale.forEach((k) => store.delete(k))).catch(() => {});

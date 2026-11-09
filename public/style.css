@@ -302,7 +302,7 @@ h1 {
   color: var(--ink-2);
 }
 
-/* 源代码链接：方便别人审计 */
+/* GitHub 链接：方便别人审计代码 */
 .source {
   margin: 20px 0 0;
   font-size: 13px;

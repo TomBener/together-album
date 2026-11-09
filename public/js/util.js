@@ -23,6 +23,17 @@ export function toast(text, ms = 2600) {
   toastTimer = setTimeout(() => el.classList.remove('is-visible'), ms);
 }
 
+/**
+ * 更新顶部的状态栏：state 定圆点颜色（live、warn、wait），text 是显示的文字。
+ * key 写在 data-status 上（status.js 返回的 i18n key），排查和自动化测试时读它，不受界面语言影响。
+ */
+export function showStatus({ state, key }, text) {
+  const chip = $('#status');
+  chip.dataset.state = state;
+  chip.dataset.status = key;
+  chip.querySelector('.chip-text').textContent = text;
+}
+
 export function showNotice({ title, text, action = null }) {
   for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
   $('#notice-title').textContent = title;

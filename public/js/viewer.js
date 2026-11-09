@@ -1,17 +1,21 @@
-import { $, api, toast, showView, showNotice, keepScreenOn, STALL_MS, DEBUG } from './util.js';
+import { $, api, toast, showView, showNotice, showStatus, keepScreenOn, STALL_MS, DEBUG } from './util.js';
 import { t, langQuery } from './i18n.js';
 import { subscribe } from './live.js';
 import { createStage, bindSwipe } from './stage.js';
 import { ViewerLink, randomId } from './rtc.js';
 import { unseal, fromBase64 } from './seal.js';
+import { viewerStatus } from './status.js';
 
 const RETRY_MS = 15_000; // 这么久还没连上，就请分享者重新发起连接
 const KINDS = ['preview', 'full', 'large']; // 一张照片的几个版本，越往后越清楚
 const AWAY_DELAY_MS = 4000; // 分享者的信令断开这么久还没回来，才算“暂时离开”；常见的短暂断线不必惊动观看者
 const isTouch = matchMedia('(hover: none)').matches;
 
+// <body data-phase> 是观看页的阶段，排查和自动化测试时直接读：watching 在看（包括还在连接），
+// ended 分享结束了，gone 还没看到照片分享就已经不在了（链接失效）。ended 和 gone 不再变
 export function startViewer(sessionId) {
   document.body.classList.add('role-viewer');
+  document.body.dataset.phase = 'watching';
   showView('stage');
   const stageEl = $('#stage');
   const stage = createStage(stageEl);
@@ -24,7 +28,6 @@ export function startViewer(sessionId) {
   const V = {
     link: null,
     p2p: 'idle',
-    signaling: 'connecting',
     failures: 0,
     progress: null,
     index: -1, // 这台设备正在看的
@@ -83,10 +86,8 @@ export function startViewer(sessionId) {
       }
       render();
     },
-    onStatus(state) {
-      V.signaling = state;
-      render();
-    },
+    // 状态栏不看自己的实时通道，只看直连和分享者在不在：直连通着时，实时通道断了也照常翻看
+    onStatus: () => render(),
     onGone: () => end(V.index >= 0 ? 'ended' : 'gone'),
   });
 
@@ -356,6 +357,7 @@ export function startViewer(sessionId) {
   function end(kind) {
     if (V.ended) return;
     V.ended = true;
+    document.body.dataset.phase = kind;
     clearTimeout(retryTimer);
     clearTimeout(stallTimer);
     clearTimeout(awayTimer);
@@ -375,24 +377,24 @@ export function startViewer(sessionId) {
 
   function render() {
     if (V.ended) return;
-    // 分享者切走了，或者离开了一阵、直连也断了。照片照常显示，也能回看，只在状态栏提示
-    const away = (V.away && V.p2p !== 'open') || (!V.hostHere && V.p2p === 'open');
     const loading = V.progress !== null && V.following;
-    // 分享者翻到的这张还一点都没显示出来时，状态栏显示接收进度；预览出来后只留顶部的进度条
-    const receiving = loading && V.shownId !== V.hostId ? `${Math.round(V.progress * 100)}%` : null;
-    let state = 'wait';
-    let text = t('connecting');
-    if (away) {
-      [state, text] = ['warn', t('hostAway')];
-    } else if (V.p2p === 'open') {
-      state = 'live';
-      text = receiving ? t('receiving', receiving) : V.viewers ? t('watching', V.viewers) : t('live');
-      if (DEBUG && V.relayed && !receiving) text += ` · ${t('relayed')}`; // 排查用（网址带 ?debug=1）
-    } else if (V.p2p === 'disconnected') [state, text] = ['warn', t('unstable')];
-    else if (V.failures) [state, text] = ['warn', t('retrying')];
-    else if (!V.link || V.signaling !== 'live') text = t('connecting');
-    $('#status').dataset.state = state;
-    $('#status .chip-text').textContent = text;
+    const status = viewerStatus({
+      p2p: V.p2p,
+      away: V.away,
+      hostHere: V.hostHere,
+      hostOnline: V.hostOnline,
+      failures: V.failures,
+      stalled: V.stalled,
+      linked: Boolean(V.link),
+      viewers: V.viewers,
+      // 分享者翻到的这张还一点都没显示出来时，显示接收进度；预览出来后只留顶部的进度条
+      receiving: loading && V.shownId !== V.hostId ? V.progress : null,
+      blank: V.index < 0,
+    });
+    let text = t(status.key, ...(status.args ?? []));
+    // 排查用（网址带 ?debug=1）
+    if (DEBUG && V.relayed && (status.key === 'live' || status.key === 'watching')) text += ` · ${t('relayed')}`;
+    showStatus(status, text);
 
     $('#counter').textContent = V.index >= 0 ? `${V.index + 1} / ${V.total}` : '';
     $('#btn-resync').hidden = V.following || V.host < 0;
@@ -402,16 +404,10 @@ export function startViewer(sessionId) {
     $('#recv').classList.toggle('is-active', loading);
     $('#recv').style.setProperty('--progress', V.progress ?? 0);
 
-    let wait = null;
-    if (V.index < 0) {
-      if (away) wait = t('hostAwayText');
-      else if (V.p2p === 'open') wait = receiving ? t('receivingPhoto', receiving) : t('waitingFirst');
-      else if (V.hostOnline && (V.failures || V.stalled)) wait = t('connectHint');
-      else if (V.link) wait = t('connectingPeer');
-      else wait = t('connecting');
-    }
+    const { wait } = status;
     $('#placeholder').hidden = !wait;
-    $('#placeholder-text').textContent = wait ?? '';
+    $('#placeholder').dataset.status = wait?.key ?? '';
+    $('#placeholder-text').textContent = wait ? t(wait.key, ...(wait.args ?? [])) : '';
   }
 
   // 一段时间没有变化后，悬浮信息淡出，让照片更突出；点一下照片显示或隐藏

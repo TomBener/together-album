@@ -31,6 +31,7 @@
   <link rel="modulepreload" href="/js/keep.js">
   <link rel="modulepreload" href="/js/seal.js">
   <link rel="modulepreload" href="/js/plan.js">
+  <link rel="modulepreload" href="/js/status.js">
 </head>
 <body>
   <!-- 两个入口共用的文件选择框，放在 body 下以保证 iOS 能从任何地方唤起 -->
@@ -68,7 +69,7 @@
     <div class="ambient" aria-hidden="true"><canvas width="32" height="32"></canvas><canvas width="32" height="32"></canvas></div>
     <div class="recv viewer-only" id="recv" aria-hidden="true"><i></i></div>
     <header class="bar bar-top">
-      <span class="chip" id="status" data-state="wait"><i class="dot"></i><span class="chip-text" data-i18n="connecting"></span></span>
+      <span class="chip" id="status" data-state="wait" data-status="connecting"><i class="dot"></i><span class="chip-text" data-i18n="connecting"></span></span>
       <div class="actions host-only">
         <button type="button" class="btn btn-glass" id="btn-invite">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2v2h-2zM18 18h2v2h-2zM14 18h2v2h-2zM18 14h2v2h-2z"/></svg>

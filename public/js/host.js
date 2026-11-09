@@ -1,9 +1,10 @@
-import { $, api, sleep, toast, showView, showNotice, keepScreenOn, copyText, STALL_MS, DEBUG } from './util.js';
+import { $, api, sleep, toast, showView, showNotice, showStatus, keepScreenOn, copyText, STALL_MS, DEBUG } from './util.js';
 import { t, langQuery } from './i18n.js';
 import { subscribe } from './live.js';
 import { createStage, bindSwipe } from './stage.js';
 import { prepareImage, previewOf, largeOf } from './images.js';
 import { HostLink, randomId } from './rtc.js';
+import { hostStatus, linkPhase, arrivals } from './status.js';
 import { canSeal, newSecret, seal, toBase64 } from './seal.js';
 import * as keep from './keep.js';
 
@@ -16,7 +17,19 @@ const inWeChat = /MicroMessenger/i.test(navigator.userAgent);
 
 // 照片经 WebRTC 加密发给观看者，从不上传服务器。分享期间暂存在本机浏览器里（keep.js），
 // 分享页被关掉或刷新后再打开，能接着分享
+//
+// phase 是分享页的阶段，同时写在 <body data-phase> 上，排查和自动化测试时直接读：
+//   landing    首页，还没开始分享
+//   creating   选了照片，正在向服务器建分享；照片同时在处理
+//   resuming   重新打开了分享页，正在取回上次的分享和暂存的照片，这时不能加新照片
+//   sharing    分享进行中
+//   ended      分享结束了：自己点了结束、过期，或者服务器上已经没有这次分享
+//   handedOff  分享在另一个页面里接着进行，这个页面停下
+// landing → creating → sharing，没建成时回到 landing。
+// 打开页面时有上次的分享：resuming → sharing，上次的分享已经结束时到 landing。
+// resuming 和 sharing 之后可能到 ended 或 handedOff，这两个阶段不再变。
 const S = {
+  phase: 'landing',
   id: null,
   key: null,
   createdAt: 0,
@@ -31,12 +44,10 @@ const S = {
   conn: 'connecting',
   live: null,
   failed: 0,
-  resuming: null, // 重新打开分享页后、照片还没取回时：{ index, total }
-  ended: false,
+  restore: null, // resuming 阶段要取回的：{ index: 上次看到第几张, total: 一共几张, started: 已经开始取 }
 };
 
 let stage;
-let creating = false;
 const unsaved = []; // 分享还没建好时就处理完的照片：[item, 各版本]，建好后再暂存
 // 加密好、准备发给观看者的数据，几位观看者共用。只留最近用到的几份：iPhone 上页面内存紧，
 // 每张照片都留一份的话，翻完 100 张要多占约 100 MB。用到被丢掉的那份时重新加密，几毫秒
@@ -44,9 +55,15 @@ const PAYLOAD_KEEP = 12;
 const payloads = new Map(); // '照片id:版本' → Promise<{ bytes, type, iv }>
 let prepareChain = Promise.resolve(); // 逐张压缩，顺序与选择顺序一致
 let inviteSignature = '';
-let openBefore = 0;
 const stallHinted = new Set(); // 已经提示过“连不上”的观看者，每人只提示一次
 const leaving = new Map(); // 实时通道断开的观看者 peerId → 放弃连接的计时器
+
+function setPhase(phase) {
+  S.phase = phase;
+  document.body.dataset.phase = phase;
+}
+
+const over = () => S.phase === 'ended' || S.phase === 'handedOff';
 
 export function startHost() {
   document.body.classList.add('role-host');
@@ -60,6 +77,7 @@ export function startHost() {
     resume(saved);
   } else {
     keep.forget(); // 清掉可能残留的照片
+    setPhase('landing');
     showView('landing');
   }
 }
@@ -68,8 +86,9 @@ export function startHost() {
 
 // 分享页被关掉或刷新后重新打开：会话还在就接着分享，发出去的链接照常有效
 async function resume(saved) {
+  setPhase('resuming');
   showView('stage');
-  $('#placeholder-text').textContent = t('resuming');
+  render();
   let status = null;
   if (Date.now() - saved.createdAt < MAX_AGE_MS) {
     try {
@@ -80,25 +99,27 @@ async function resume(saved) {
   }
   if (!status) {
     keep.forget();
+    setPhase('landing');
     showView('landing');
     toast(t('lastShareEnded'));
     return;
   }
-  S.resuming = { index: saved.index ?? 0, total: saved.total ?? 0 };
+  S.restore = { index: saved.index ?? 0, total: saved.total ?? 0, started: false };
   begin({ id: saved.id, hostKey: saved.key, joinUrls: saved.joinUrls ?? [], ice: [] }, saved.createdAt);
   if (status.keepKey) restorePhotos(status.keepKey);
 }
 
 // 用服务器给的钥匙解开暂存的照片，回到关掉前看的那张
 async function restorePhotos(keepKey) {
-  const pending = S.resuming;
-  if (!pending || pending.started) return;
+  const pending = S.restore;
+  if (S.phase !== 'resuming' || !pending || pending.started) return;
   pending.started = true;
   keep.useKey(keepKey);
   const photos = await keep.loadPhotos(S.id);
-  if (S.ended) return;
+  if (S.phase !== 'resuming') return; // 取的时候分享结束了，或者到另一个页面里继续了
   for (const p of photos) markReady(addItem(), p, { restored: true });
-  S.resuming = null; // 取回之后才能添加新照片，新照片接在后面
+  S.restore = null;
+  setPhase('sharing'); // 取回之后才能添加新照片，新照片接在后面
   if (S.photos.length) setIndex(Math.min(Math.max(pending.index, 0), S.photos.length - 1));
   remember();
   render();
@@ -110,27 +131,27 @@ async function onPick() {
   const picker = $('#picker');
   const files = [...picker.files];
   picker.value = '';
-  if (!files.length || S.ended) return;
-  if (S.resuming) {
+  if (!files.length || over()) return;
+  if (S.phase === 'resuming') {
     toast(t('resuming')); // 先等暂存的照片取回来，新照片排在它们后面
     return;
   }
-  if (!S.id && !creating) createSession(); // 不等服务器：照片马上显示、开始处理，分享同时在建
+  if (S.phase === 'landing') createSession(); // 不等服务器：照片马上显示、开始处理，分享同时在建
   addFiles(files);
 }
 
 async function createSession() {
-  creating = true;
+  setPhase('creating');
   showView('stage');
   render();
   try {
-    begin(await postSession());
+    const session = await postSession();
+    setPhase('sharing');
+    begin(session);
     openInvite();
   } catch {
     toast(t('networkLater'));
     abandon();
-  } finally {
-    creating = false;
   }
 }
 
@@ -158,6 +179,7 @@ function abandon() {
   unsaved.length = 0;
   payloads.clear();
   stage.clear();
+  setPhase('landing');
   showView('landing');
 }
 
@@ -188,7 +210,7 @@ function begin(session, createdAt = Date.now()) {
 
 // 记下会话，分享页被关掉后重新打开时用。照片还没取回时不记，免得盖掉上次看到第几张
 function remember() {
-  if (S.ended || S.resuming || !S.id) return;
+  if (S.phase !== 'sharing' || !S.id) return;
   keep.saveSession({
     id: S.id,
     key: S.key,
@@ -211,7 +233,7 @@ function onMessage(msg) {
     case 'hello': // 首次连上或重连：对齐观看者名单。重新打开的分享页从这里拿到连接配置
       S.joinUrls = msg.joinUrls;
       if (msg.ice) S.iceServers = msg.ice;
-      if (S.resuming) restorePhotos(msg.keepKey); // 没有钥匙（旧会话）时取不回照片，提示分享者重新添加
+      if (S.phase === 'resuming') restorePhotos(msg.keepKey); // 没有钥匙（旧会话）时取不回照片，提示分享者重新添加
       remember();
       for (const [peerId, link] of S.links) if (!msg.peers.includes(peerId) && !link.open) leaveLater(peerId);
       for (const peerId of msg.peers) ensurePeer(peerId);
@@ -270,7 +292,7 @@ function connectPeer(peerId) {
   S.links.set(peerId, link);
   link.focus(S.photos, S.index);
   setTimeout(() => {
-    if (S.ended || S.links.get(peerId) !== link || link.open || stallHinted.has(peerId)) return;
+    if (over() || S.links.get(peerId) !== link || link.open || stallHinted.has(peerId)) return;
     stallHinted.add(peerId);
     toast(t('connectHint'), 8000);
   }, STALL_MS);
@@ -306,9 +328,8 @@ async function endOnServer({ id, key }) {
   // 一直没通知到服务器：留着记录，下次打开页面时再发
 }
 
-// 停下这个页面：关掉连接、清掉照片
+// 停下这个页面：关掉连接、清掉照片。调用前先把阶段设成 ended 或 handedOff
 function teardown(sayEnd) {
-  S.ended = true;
   for (const link of S.links.values()) {
     if (sayEnd) link.end();
     else link.close();
@@ -330,13 +351,15 @@ function teardown(sayEnd) {
 
 // 分享在另一个页面里接着进行了：这里停下，但不结束分享，也不删暂存的照片
 function handOff() {
-  if (S.ended) return;
+  if (over()) return;
+  setPhase('handedOff');
   teardown(false);
   showNotice({ title: t('handedOff'), text: t('handedOffText') });
 }
 
 function finish(reason) {
-  if (S.ended) return;
+  if (over()) return;
+  setPhase('ended');
   teardown(true);
   keep.forget();
   const text = {
@@ -360,7 +383,7 @@ function addFiles(files) {
   for (const [i, file] of files.entries()) {
     const item = items[i];
     prepareChain = prepareChain.then(async () => {
-      const dropped = () => S.ended || !S.items.includes(item); // 分享结束了，或者分享没建成、照片已丢掉
+      const dropped = () => over() || !S.items.includes(item); // 分享结束了，或者分享没建成、照片已丢掉
       if (dropped()) return;
       try {
         const parts = await prepareImage(file);
@@ -451,7 +474,7 @@ function dropItem(item) {
 // ---- 翻页 ----
 
 function go(index) {
-  if (S.ended || index === S.index || index < 0) return;
+  if (over() || index === S.index || index < 0) return;
   if (index >= S.photos.length) {
     if (S.photos.length) toast(t(S.items.some((i) => !i.ready) ? 'nextPreparing' : 'lastPhoto'));
     return;
@@ -483,36 +506,26 @@ function broadcast() {
 // ---- 界面 ----
 
 function render() {
-  if (S.ended) return;
-  const links = [...S.links.values()];
+  if (over()) return;
+  const peers = [...S.links].map(([peerId, link]) => [peerId, linkPhase(link)]);
+  const phases = peers.map(([, phase]) => phase);
   // 只算正在看的：页面切到后台或网络中断的朋友算暂时离开
-  const present = links.filter((l) => l.present).length;
-  // 连着的（含暂时离开的），只用来判断有没有新朋友加入：朋友从后台回来时不再提示一遍
-  const joined = links.filter((l) => l.open).length;
-  for (const link of links) link.setViewers(present);
-  // 还没连上过、也没失败的都算在连：网络层已连通、通道还差一步时也是。连上过又断开的算暂时离开
-  const connecting = links.filter((l) => !l.wasOpen && l.state !== 'failed' && l.state !== 'closed').length;
+  const present = phases.filter((p) => p === 'present').length;
+  for (const link of S.links.values()) link.setViewers(present);
 
-  let state = 'live';
-  let text = t('watching', present);
-  for (const [peerId, link] of S.links) if (link.wasOpen) S.met.add(peerId);
-  // 排查时标出有人经中转连上（网址带 ?debug=1）
-  if (DEBUG && links.some((l) => l.present && l.relayed)) text += ` · ${t('relayed')}`;
-  if (!present) {
-    if (S.conn !== 'live') [state, text] = ['warn', t(S.conn === 'connecting' ? 'connecting' : 'reconnecting')];
-    else if (connecting) [state, text] = ['wait', t('friendConnecting')];
-    else if (S.met.size) [state, text] = ['wait', t('friendAway')];
-    else [state, text] = ['wait', t('waitingFriends')];
-  }
-  $('#status').dataset.state = state;
-  $('#status .chip-text').textContent = text;
-
-  if (joined > openBefore) {
+  // 有朋友第一次连上：收起邀请，提示一下。同一位朋友断线重连、从后台回来都不再提示
+  const { fresh, toast: joinedToast } = arrivals(peers, S.met, { touch: isTouch });
+  for (const peerId of fresh) S.met.add(peerId);
+  if (joinedToast) {
     if ($('#invite').open) $('#invite').close();
-    if (openBefore === 0) toast(t(isTouch ? 'friendJoinedTouch' : 'friendJoinedMouse'));
-    else toast(t('joined', present));
+    toast(t(joinedToast.key, ...(joinedToast.args ?? [])));
   }
-  openBefore = joined;
+
+  const status = hostStatus({ conn: S.conn, phases, met: S.met.size });
+  let text = t(status.key, ...(status.args ?? []));
+  // 排查时标出有人经中转连上（网址带 ?debug=1）
+  if (DEBUG && [...S.links.values()].some((l) => l.present && l.relayed)) text += ` · ${t('relayed')}`;
+  showStatus(status, text);
 
   const pending = S.items.filter((i) => !i.ready).length;
   const parts = [];
@@ -521,7 +534,9 @@ function render() {
   $('#counter').textContent = parts.join(' · ');
 
   $('#placeholder').hidden = S.index >= 0;
-  $('#placeholder-text').textContent = t(S.resuming ? 'resuming' : S.items.length ? 'preparingPhotos' : 'pickToContinue');
+  const wait = S.phase === 'resuming' ? 'resuming' : S.items.length ? 'preparingPhotos' : 'pickToContinue';
+  $('#placeholder').dataset.status = S.index >= 0 ? '' : wait;
+  $('#placeholder-text').textContent = t(wait);
   $('#btn-prev').disabled = S.index <= 0;
   $('#btn-next').disabled = S.index >= S.photos.length - 1;
   // 分享还在建：还没有链接可邀请，也没有分享可结束
@@ -586,7 +601,8 @@ function bindControls() {
   $('#btn-invite').addEventListener('click', openInvite);
   $('#btn-start').addEventListener('click', () => {
     $('#invite').close();
-    if (isTouch && openBefore === 0) toast(t('swipeHint'));
+    // 已经有朋友连着的话，连上时的提示里说过怎么翻页了
+    if (isTouch && ![...S.links.values()].some((l) => l.open)) toast(t('swipeHint'));
   });
   $('#share-text').textContent = t(isApple ? 'airdrop' : 'sendLink');
   $('#btn-share').addEventListener('click', async () => {

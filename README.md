@@ -49,20 +49,20 @@ npm run deploy       # 即 cf deploy：构建、上传并绑定 .env 里的域�
 npm run dev:worker   # 即 cf dev：在本机运行 Worker 版本（http://localhost:8787）
 ```
 
-TURN 中继用 Cloudflare Realtime 的 TURN 服务（每月 1000 GB 免费）。密钥存在 Worker 的 secret 里，`cloudflare.config.ts` 声明了它们，缺了会拒绝部署。第一次部署前新建密钥，存进 macOS 钥匙串，部署时从钥匙串读出来传进去，不写进文件：
+TURN 中继用 Cloudflare Realtime 的 TURN 服务（每月 1000 GB 免费）。密钥存在 Worker 的 secret 里，`cloudflare.config.ts` 声明了 `TURN_KEY_ID` 和 `TURN_KEY_API_TOKEN`。新建密钥后存进 macOS 钥匙串，再从钥匙串读出来设给 Worker，不写进文件。只需设一次，之后 `npm run deploy` 会保留它们：
 
 ```bash
-cf realtime turn keys create --name together-album    # 返回 uid 和 secret
+cf realtime turn keys create --name together-album    # 输出里的 uid 和 secret 就是这两项，别把整个输出贴出去
 security add-generic-password -a together-album -s together-album.TURN_KEY_ID -w '<uid>'
 security add-generic-password -a together-album -s together-album.TURN_KEY_API_TOKEN -w '<secret>'
 
-printf 'TURN_KEY_ID=${TURN_KEY_ID}\nTURN_KEY_API_TOKEN=${TURN_KEY_API_TOKEN}\n' > /tmp/turn.env   # 只写变量名
-TURN_KEY_ID="$(security find-generic-password -a together-album -s together-album.TURN_KEY_ID -w)" \
-TURN_KEY_API_TOKEN="$(security find-generic-password -a together-album -s together-album.TURN_KEY_API_TOKEN -w)" \
-cf deploy --secrets-file /tmp/turn.env
+for name in TURN_KEY_ID TURN_KEY_API_TOKEN; do
+  cf workers secrets update "$name" --worker together-album --type secret_text \
+    --text "$(security find-generic-password -a together-album -s together-album.$name -w)"
+done
 ```
 
-本机 `cf dev` 时同样用环境变量传入这两项；不传也能跑，只是没有中继。
+不要用 `cf deploy --secrets-file` 传密钥：它不展开文件里的 `${…}`，会把变量名原样当成密钥上传。本机 `cf dev` 时用同名环境变量传入这两项（`TURN_KEY_ID="$(security …)" cf dev`）；不传也能跑，只是没有中继。
 ## 本地运行（Node 版）
 
 不想依赖外网时，用 Node 版信令服务器。需要 Node.js 20 以上。
